@@ -1,4 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS kb_documents (
     id SERIAL PRIMARY KEY,
@@ -38,3 +37,22 @@ CREATE TABLE IF NOT EXISTS kb_embeddings (
 
 CREATE INDEX IF NOT EXISTS idx_kb_documents_tsv ON kb_documents USING GIN (tsv);
 CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING GIN (tsv);
+
+CREATE TABLE IF NOT EXISTS llm_key_registry (
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    key_label TEXT NOT NULL,
+    priority INTEGER NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (provider, model, key_label)
+);
+
+CREATE TABLE IF NOT EXISTS llm_key_state (
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    key_label TEXT NOT NULL,
+    exhausted_at TIMESTAMPTZ,
+    available_after TIMESTAMPTZ,
+    last_error TEXT,
+    PRIMARY KEY (provider, model, key_label)
+);

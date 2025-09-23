@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+.env/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Local databases and secrets
+gemini.db
+gapistash2
+
+# IDE/editor
+.vscode/
+.DS_Store
+.idea/
+
+# Logs
+*.log
+
+# Generated artifacts
+*.sqlite
+*.db
+*.log
+
+# Misc
+*.swp

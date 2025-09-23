@@ -5,3 +5,5 @@ pydantic-settings>=2.2.1
 SQLAlchemy>=2.0.30
 prefect>=2.20.0
 pytest>=8.2.0
+litellm>=1.45.0
+psycopg2-binary>=2.9.9
