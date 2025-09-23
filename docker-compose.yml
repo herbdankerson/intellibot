@@ -29,7 +29,7 @@ services:
       - paradedb
 
   prefect:
-    image: prefecthq/prefect:2-latest
+    image: prefecthq/prefect:3-latest
     command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
     environment:
       PREFECT_API_URL: http://prefect:4200/api
