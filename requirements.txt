@@ -1,0 +1,7 @@
+fastapi>=0.111.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.2.1
+SQLAlchemy>=2.0.30
+prefect>=2.20.0
+pytest>=8.2.0

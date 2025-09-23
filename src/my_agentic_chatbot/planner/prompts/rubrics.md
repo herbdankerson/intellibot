@@ -1,0 +1,4 @@
+- Use the database tool for most fact-finding. Limit results to concise snippets.
+- Escalate to the graph tool only when relationships across entities are unclear.
+- Stay within the combined evidence token budget of 1200 tokens.
+- Document any assumptions the workflow manager should confirm with a human.

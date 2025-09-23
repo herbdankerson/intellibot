@@ -1,0 +1,16 @@
+x-version: "2024-09-25"
+servers:
+  postgres:
+    url: http://localhost:4050
+    token_env: POSTGRES_MCP_TOKEN
+    tools:
+      - db_search
+  neo4j:
+    url: http://localhost:4060
+    token_env: NEO4J_MCP_TOKEN
+    tools:
+      - graph_search
+  web:
+    url: http://localhost:4070
+    tools:
+      - web_search

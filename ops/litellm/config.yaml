@@ -1,0 +1,25 @@
+x-version: "2024-09-25"
+models:
+  - name: planner
+    model: gpt-4o-mini
+    params:
+      temperature: 0
+      max_tokens: 2048
+  - name: responder
+    model: gpt-4o
+    params:
+      temperature: 0
+      max_tokens: 1024
+  - name: cheap-worker
+    model: gpt-4o-mini
+    params:
+      temperature: 0.2
+      max_tokens: 1024
+  - name: emb-general
+    model: text-embedding-3-large
+  - name: emb-code
+    model: text-embedding-3-large
+  - name: emb-law
+    model: text-embedding-3-large
+router:
+  default: planner

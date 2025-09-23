@@ -379,7 +379,7 @@ ANTHROPIC_KEY=
 GOOGLE_API_KEY=
 COHERE_KEY=
 
-DATABASE_URL=postgresql://user:pass@localhost:5432/agentdb
+DATABASE_URL=postgresql://user:pass@localhost:5432/agentdb  # pragma: allowlist secret
 
 POSTGRES_MCP_TOKEN=
 NEO4J_URI=bolt://localhost:7687
