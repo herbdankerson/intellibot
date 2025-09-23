@@ -1,4 +1,4 @@
-x-version: "2024-09-25"
+x-version: "2025-01-01"
 models:
   - name: planner
     model: gpt-4o-mini
@@ -21,5 +21,12 @@ models:
     model: text-embedding-3-large
   - name: emb-law
     model: text-embedding-3-large
+  - name: gemini-fallback
+    model: google_gemini/gemini-2.5-pro
+    params:
+      temperature: 0
+      max_output_tokens: 2048
 router:
   default: planner
+  callbacks:
+    - gemini_failover

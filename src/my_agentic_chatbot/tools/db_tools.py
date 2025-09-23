@@ -2,92 +2,131 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Sequence
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List
 
+from ..config import MCPServerConfig, get_settings
+from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
 from ..schemas import EvidenceItem
 from ..util.text import build_snippet, deduplicate_items
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
 class DatabaseTool:
-    """Very small in-memory database search helper."""
+    """Adapter that queries the Postgres MCP server."""
 
     max_results: int = 5
     snippet_chars: int = 320
-    documents: Sequence[Dict[str, str]] = field(default_factory=lambda: list(_default_documents()))
+    client: MCPClient | None = None
+    tool_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.client is None:
+            settings = get_settings()
+            config = settings.mcp_server("postgres")
+            self.tool_name = self.tool_name or self._default_tool(config)
+            self.client = MCPClient(
+                base_url=config.url,
+                token=config.token,
+                server_name=f"{config.name}-client",
+            )
+        else:
+            self.tool_name = self.tool_name or "db_search"
 
     def search(self, query: str, *, limit: int | None = None) -> List[EvidenceItem]:
         """Return evidence items for the provided natural language query."""
 
-        limit = limit or self.max_results
-        limit = min(limit, self.max_results)
-        scored_docs = sorted(
-            self._scored_documents(query=query),
-            key=lambda entry: entry["score"],
-            reverse=True,
+        if not query.strip():
+            return []
+        limit = min(limit or self.max_results, self.max_results)
+        if not self.client or not self.tool_name:
+            raise RuntimeError("Database tool is not configured with an MCP client")
+
+        response = self.client.call_tool_sync(
+            self.tool_name,
+            {"query": query, "limit": limit},
         )
+        rows = self._extract_rows(response)
+        items = [self._row_to_evidence(index, row) for index, row in enumerate(rows[:limit])]
+        if not items and response.content:
+            items = self._fallback_from_content(response.content, limit)
+        return deduplicate_items(items)[:limit]
+
+    def _default_tool(self, config: MCPServerConfig) -> str:
+        if config.tools:
+            return config.tools[0]
+        LOGGER.warning("Postgres MCP config missing tools list; defaulting to db_search")
+        return "db_search"
+
+    def _extract_rows(self, response: MCPToolResponse) -> List[Dict[str, Any]]:
+        payload = response.best_effort_payload()
+        rows: List[Dict[str, Any]] = []
+        if isinstance(payload, dict):
+            for key in ("rows", "items", "results", "data"):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    rows = [entry for entry in candidate if isinstance(entry, dict)]
+                    if rows:
+                        break
+        elif isinstance(payload, list):
+            rows = [entry for entry in payload if isinstance(entry, dict)]
+        else:
+            LOGGER.debug("Unexpected MCP payload type", extra={"type": type(payload).__name__})
+        return rows
+
+    def _row_to_evidence(self, index: int, row: Dict[str, Any]) -> EvidenceItem:
+        raw_content = row.get("snippet") or row.get("content") or row.get("text") or ""
+        snippet = build_snippet(str(raw_content), self.snippet_chars)
+        source = (
+            row.get("source")
+            or row.get("uri")
+            or row.get("document_id")
+            or row.get("id")
+            or "postgres-mcp"
+        )
+        score_value = row.get("score") or row.get("rank") or row.get("bm25") or 0.0
+        try:
+            score = float(score_value)
+        except (TypeError, ValueError):
+            score = 0.0
+        metadata: Dict[str, str] = {}
+        for key, value in row.items():
+            if key in {"snippet", "content", "text", "score", "rank", "bm25"}:
+                continue
+            if key.lower() in {"embedding", "vector", "embedding_vector"}:
+                continue
+            if value is None:
+                continue
+            metadata[key] = str(value)
+        if "retrieval_strategy" not in metadata:
+            metadata["retrieval_strategy"] = "postgres-mcp"
+        return EvidenceItem(
+            id=f"db-{index + 1}",
+            source=str(source),
+            content=snippet,
+            score=score,
+            metadata=metadata,
+        )
+
+    def _fallback_from_content(self, content: Iterable[str], limit: int) -> List[EvidenceItem]:
         items: List[EvidenceItem] = []
-        for index, doc in enumerate(scored_docs[:limit]):
-            snippet = build_snippet(doc["content"], self.snippet_chars)
-            item = EvidenceItem(
-                id=f"db-{index + 1}",
-                source=doc["source"],
-                content=snippet,
-                score=doc["score"],
-                metadata={
-                    "document_id": doc["id"],
-                    "title": doc.get("title", ""),
-                    "retrieval_strategy": "bm25-lite",
-                },
+        for index, block in enumerate(content):
+            if index >= limit:
+                break
+            snippet = build_snippet(str(block), self.snippet_chars)
+            items.append(
+                EvidenceItem(
+                    id=f"db-{index + 1}",
+                    source="postgres-mcp",
+                    content=snippet,
+                    score=0.0,
+                    metadata={"retrieval_strategy": "text-fallback"},
+                )
             )
-            items.append(item)
-        return deduplicate_items(items)
-
-    def _scored_documents(self, query: str) -> Iterable[Dict[str, str]]:
-        """Yield documents with a very small relevance score."""
-
-        normalized_query = query.lower().split()
-        for doc in self.documents:
-            corpus = doc["content"].lower()
-            score = sum(1 for token in normalized_query if token in corpus)
-            yield {**doc, "score": float(score or 0.1)}
-
-
-def _default_documents() -> Iterable[Dict[str, str]]:
-    """Return a deterministic, in-memory corpus for local tests."""
-
-    yield {
-        "id": "doc-1",
-        "title": "Agentic retrieval overview",
-        "source": "kb_documents:1",
-        "content": (
-            "Agentic retrieval pipelines combine planners, workflow orchestrators, "
-            "and tool agents. The database stage blends BM25 and vector search to "
-            "produce compact snippets with strong recall before handing to a "
-            "responder model."
-        ),
-    }
-    yield {
-        "id": "doc-2",
-        "title": "Prefect orchestration",
-        "source": "kb_documents:2",
-        "content": (
-            "Prefect flows coordinate approvals and retries. Each task receives a "
-            "strict timeout and token budget so that evidence packs stay within the "
-            "global limit."
-        ),
-    }
-    yield {
-        "id": "doc-3",
-        "title": "Evidence packs",
-        "source": "kb_documents:3",
-        "content": (
-            "Evidence packs deduplicate overlapping passages and trim each snippet "
-            "to a few hundred characters. Citations reference the evidence item id "
-            "and unresolved assumptions are recorded."
-        ),
-    }
+        return items
 
 
 __all__ = ["DatabaseTool"]

@@ -1,14 +1,48 @@
 # My Agentic Chatbot
 
 This repository bootstraps a modular agentic chatbot that follows the architecture
-outlined in `instructions.md`. It includes:
+outlined in `instructions.md`. It now wires the runtime stack described in the project
+contract:
 
-- A FastAPI application with `/health` and `/run` endpoints.
-- Planner, workflow orchestrator, and responder components.
-- Lightweight database, graph, and web tool adapters.
-- Ops scripts for migrations, ingestion, and embedding jobs.
-- Configuration for LiteLLM and MCP servers plus JSON Schemas for validation.
-- Unit tests covering the core planner, orchestrator, tools, and responder behavior.
+- LiteLLM is the single entrypoint for planner/responder/embedding calls.
+- The workflow orchestrator runs as a Prefect flow with approvals at plan, task, and
+  final-response checkpoints.
+- Database tools communicate with the Postgres MCP server over FastMCP SSE transport.
+- Docker Compose spins up ParadeDB/Postgres, LiteLLM, Prefect, OpenWebUI, and the
+  Postgres MCP sidecar.
+
+## Quick start
+
+1. **Install dependencies** (for local scripts/tests):
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+2. **Run services**:
+
+   ```bash
+   docker compose up -d
+   ```
+
+   This provisions ParadeDB, LiteLLM, Prefect (`http://localhost:4200`), OpenWebUI
+   (`http://localhost:3000`), and the Postgres MCP server (`http://localhost:4050`).
+
+3. **Apply the schema and seed content**:
+
+   ```bash
+   python ops/scripts/migrate.py
+   python ops/scripts/ingest_docs.py docs
+   python ops/scripts/embed_chunks.py --space emb-general
+   ```
+
+4. **Run the FastAPI app (optional)**:
+
+   ```bash
+   uvicorn src.my_agentic_chatbot.main:app --host 0.0.0.0 --port 8000
+   ```
 
 ## Development
 
@@ -20,6 +54,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pytest
 ```
+
+The test suite now covers the Prefect workflow, MCP client normalization, and the
+LiteLLM-backed planner/responder adapters.
 
 ## Running the API
 

@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  paradedb:
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_DB: agentdb
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agentpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - paradedb-data:/var/lib/postgresql/data
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    environment:
+      LITELLM_MASTER_KEY: ${OPENAI_KEY_1:-changeme}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      COHERE_KEY: ${COHERE_KEY:-}
+    volumes:
+      - ./ops/litellm/config.yaml:/app/config.yaml:ro
+    depends_on:
+      - paradedb
+
+  prefect:
+    image: prefecthq/prefect:2-latest
+    command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+    ports:
+      - "4200:4200"
+    volumes:
+      - prefect-data:/root/.prefect
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:latest
+    env_file:
+      - .env
+    environment:
+      OPENAI_API_BASE: http://litellm:4000
+      OPENAI_API_KEY: ${OPENAI_KEY_1:-changeme}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - litellm
+
+  postgres-mcp:
+    image: python:3.12-slim
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://agent:agentpass@paradedb:5432/agentdb
+      POSTGRES_MCP_TOKEN: ${POSTGRES_MCP_TOKEN:-dev-token}
+    command: >
+      sh -c "pip install --no-cache-dir postgres-mcp && postgres-mcp $${DATABASE_URL} --transport sse --sse-host 0.0.0.0 --sse-port 4050"
+    depends_on:
+      - paradedb
+    ports:
+      - "4050:4050"
+
+volumes:
+  paradedb-data:
+  prefect-data:
