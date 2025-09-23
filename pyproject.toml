@@ -10,14 +10,14 @@ authors = [{name = "Codex"}]
 requires-python = ">=3.11"
 license = {text = "MIT"}
 dependencies = [
-    "fastapi>=0.111.0",
-    "uvicorn>=0.30.0",
-    "pydantic>=2.7.0",
-    "pydantic-settings>=2.2.1",
-    "SQLAlchemy>=2.0.30",
-    "prefect>=2.20.0",
-    "litellm>=1.45.0",
-    "psycopg2-binary>=2.9.9",
+    "fastapi>=0.117.1",
+    "uvicorn>=0.37.0",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.10.1",
+    "SQLAlchemy>=2.0.43",
+    "prefect>=3.4.19",
+    "litellm>=1.77.3",
+    "psycopg2-binary>=2.9.10",
 ]
 
 [project.optional-dependencies]
