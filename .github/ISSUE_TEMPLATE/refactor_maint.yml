@@ -1,0 +1,28 @@
+name: Refactor / Maintain
+description: Document scope and safety checks for maintenance efforts
+title: "[Refactor] "
+labels:
+  - codex:refactor
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is being refactored or cleaned up?
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety Checks
+      description: Tests, comparisons, or metrics to ensure no regressions
+  - type: textarea
+    id: expectations
+    attributes:
+      label: Expected No-op Behavior
+      description: Which functional behaviors must stay identical?
+  - type: textarea
+    id: benchmark
+    attributes:
+      label: Benchmark / Performance Notes
+      description: Provide baselines if applicable

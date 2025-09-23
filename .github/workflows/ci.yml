@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install ruff mypy sqlfluff jsonschema pre-commit pytest
+      - name: Pre-commit
+        if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'codex:plan')
+        run: pre-commit run --all-files
+      - name: Validate configs
+        if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'codex:plan')
+        run: |
+          python - <<'PY'
+import json, yaml, pathlib, sys
+from jsonschema import validate
+ops = pathlib.Path('ops')
+configs = {
+    'litellm/config.yaml': 'schemas/litellm.schema.json',
+    'mcp/servers.yaml': 'schemas/mcp_servers.schema.json',
+}
+for cfg, schema in configs.items():
+    cfg_path = ops / cfg
+    schema_path = ops / schema
+    if cfg_path.exists() and schema_path.exists():
+        with cfg_path.open() as cf, schema_path.open() as sf:
+            validate(yaml.safe_load(cf), json.load(sf))
+PY
+      - name: Run tests
+        if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'codex:plan')
+        run: pytest -q

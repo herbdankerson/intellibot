@@ -1,0 +1,49 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+
+jobs:
+  enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require workflow label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          python - <<'PY'
+import json, os, sys
+labels = {item['name'] for item in json.loads(os.environ.get('LABELS', '[]'))}
+required = {'codex:plan', 'codex:generate', 'codex:refactor'}
+if labels.isdisjoint(required):
+    print('Pull request must include one workflow label (codex:plan/generate/refactor).')
+    sys.exit(1)
+PY
+      - name: Check for non-author approval when safe-to-merge
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          python - <<'PY'
+import json, os, sys, urllib.request
+labels = {item['name'] for item in json.loads(os.environ.get('LABELS', '[]'))}
+if 'safe-to-merge' not in labels:
+    sys.exit(0)
+repo = os.environ['REPO']
+number = os.environ['PR_NUMBER']
+author = os.environ['AUTHOR']
+req = urllib.request.Request(
+    f'https://api.github.com/repos/{repo}/pulls/{number}/reviews',
+    headers={'Authorization': f"token {os.environ['GITHUB_TOKEN']}", 'Accept': 'application/vnd.github+json'},
+)
+with urllib.request.urlopen(req) as resp:
+    reviews = json.load(resp)
+approvers = {item['user']['login'] for item in reviews if item.get('state') == 'APPROVED' and item.get('user', {}).get('login') != author}
+if not approvers:
+    print('safe-to-merge label requires at least one non-author approval.')
+    sys.exit(1)
+PY

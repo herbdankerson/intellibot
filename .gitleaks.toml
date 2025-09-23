@@ -1,0 +1,6 @@
+[allowlist]
+  description = "Allow common test fixtures"
+  paths = [
+    "README.md",
+    "docs/"
+  ]
