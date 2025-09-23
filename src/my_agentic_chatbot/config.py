@@ -83,6 +83,13 @@ class Settings(BaseSettings):
         default=60.0, alias="LITELLM_TIMEOUT_SECONDS"
     )
     mcp_servers_path: str = Field(default="ops/mcp/servers.yaml", alias="MCP_SERVERS_PATH")
+    prefect_api_url: Optional[str] = Field(default=None, alias="PREFECT_API_URL")
+    prefect_server_ephemeral_enabled: bool = Field(
+        default=True, alias="PREFECT_SERVER_EPHEMERAL_ENABLED"
+    )
+    prefect_server_ephemeral_startup_timeout_seconds: int = Field(
+        default=60, alias="PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS"
+    )
 
     def lite_llm_headers(self) -> Dict[str, str]:
         """Return default headers for LiteLLM proxy calls."""
@@ -132,6 +139,9 @@ class Settings(BaseSettings):
             "neo4j_uri": self.neo4j_uri,
             "planner_model": self.planner_model,
             "responder_model": self.responder_model,
+            "prefect_api_url": self.prefect_api_url,
+            "prefect_server_ephemeral_enabled": self.prefect_server_ephemeral_enabled,
+            "prefect_server_ephemeral_startup_timeout_seconds": self.prefect_server_ephemeral_startup_timeout_seconds,
         }
 
 

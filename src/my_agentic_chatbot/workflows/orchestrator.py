@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Iterable, List, Tuple
 
 from prefect import flow, get_run_logger, task
+from prefect.settings import (
+    PREFECT_API_URL,
+    PREFECT_SERVER_EPHEMERAL_ENABLED,
+    PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS,
+    temporary_settings,
+)
 
+from ..config import get_settings
 from ..response.responder import Responder
 from ..schemas import (
     AgentResponse,
@@ -283,22 +290,40 @@ class WorkflowOrchestrator:
     def db_tool(self) -> DatabaseTool:
         return self.tools.db
 
+    @contextmanager
+    def _prefect_settings_context(self):
+        settings = get_settings()
+        overrides = {
+            PREFECT_SERVER_EPHEMERAL_ENABLED: settings.prefect_server_ephemeral_enabled,
+        }
+        overrides[
+            PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS
+        ] = settings.prefect_server_ephemeral_startup_timeout_seconds
+        api_url = settings.prefect_api_url
+        if api_url:
+            overrides[PREFECT_API_URL] = api_url
+        context = temporary_settings(overrides) if overrides else nullcontext()
+        with context:
+            yield
+
     def execute_plan(self, plan: Plan, *, message: str | None = None) -> ExecutionResult:
         with workflow_runtime(self.tools, self.responder, self.approver):
-            output = _agentic_workflow_flow(
-                message=message or "Plan execution",
-                plan=plan,
-                deliver_response=False,
-            )
+            with self._prefect_settings_context():
+                output = _agentic_workflow_flow(
+                    message=message or "Plan execution",
+                    plan=plan,
+                    deliver_response=False,
+                )
         return output.result
 
     def run_pipeline(self, message: str, plan: Plan) -> Tuple[AgentResponse, ExecutionResult]:
         with workflow_runtime(self.tools, self.responder, self.approver):
-            output = _agentic_workflow_flow(
-                message=message,
-                plan=plan,
-                deliver_response=True,
-            )
+            with self._prefect_settings_context():
+                output = _agentic_workflow_flow(
+                    message=message,
+                    plan=plan,
+                    deliver_response=True,
+                )
         response = output.response
         if response is None:  # pragma: no cover - defensive fallback
             response = AgentResponse(
