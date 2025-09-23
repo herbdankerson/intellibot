@@ -1,0 +1,7 @@
+- [ ] Linked issue(s)
+- [ ] Changes summarized
+- [ ] Contracts touched (schemas, prompts, YAML)
+- [ ] Tests added/updated and passing locally
+- [ ] Backwards compatibility (notes)
+- [ ] Security review (keys/configs unaffected)
+- [ ] Manual steps (if any)

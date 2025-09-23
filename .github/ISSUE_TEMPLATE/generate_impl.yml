@@ -1,0 +1,30 @@
+name: Generate / Implement
+description: Provide the implementation spec for Codex CLI execution
+title: "[Generate] "
+labels:
+  - codex:generate
+body:
+  - type: textarea
+    id: spec
+    attributes:
+      label: Spec
+      description: Files or directories to create/edit with requirements
+    validations:
+      required: true
+  - type: textarea
+    id: interfaces
+    attributes:
+      label: Interfaces & Contracts
+      description: Schemas, prompts, or APIs that must be honored
+  - type: textarea
+    id: tests
+    attributes:
+      label: Test Plan
+      description: Expected automated or manual tests
+  - type: textarea
+    id: done
+    attributes:
+      label: Definition of Done
+      description: Checklist the PR must satisfy
+    validations:
+      required: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Human Support
+    url: https://github.com/herbdankerson/intellibot/discussions/new
+    about: Start a discussion for anything that does not fit the templates.

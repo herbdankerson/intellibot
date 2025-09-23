@@ -1,0 +1,35 @@
+name: Design / Plan
+description: Capture objectives, constraints, and acceptance checks before implementation
+title: "[Plan] "
+labels:
+  - codex:plan
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What outcome is needed?
+    validations:
+      required: true
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: Prior context, related work, or links
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Guardrails, limits, or must-not-change notes
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Definition of done to confirm success
+    validations:
+      required: true
+  - type: textarea
+    id: modules
+    attributes:
+      label: Affected Modules
+      description: Code, prompts, configs, or docs that change
