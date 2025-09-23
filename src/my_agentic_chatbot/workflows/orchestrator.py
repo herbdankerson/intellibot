@@ -118,6 +118,36 @@ class WorkflowOrchestrator:
 
         result = self.execute_plan(plan)
         response = self.responder.respond(message, result.evidence)
+        approval = self.approver.approve_response(response)
+        if not approval.approved:
+            reason = approval.reason or "Response rejected by approver."
+            note = f"Response rejected: {reason}"
+            result.report.record(
+                ExecutionEvent(
+                    task_id="final_response",
+                    status=TaskStatus.FAILED,
+                    message=note,
+                )
+            )
+            result.report.notes.append(note)
+            return (
+                AgentResponse(
+                    answer="Final response requires revision before delivery.",
+                    citations=[],
+                    confidence=0.0,
+                    unresolved_questions=[reason],
+                ),
+                result,
+            )
+
+        result.report.record(
+            ExecutionEvent(
+                task_id="final_response",
+                status=TaskStatus.COMPLETED,
+                message="Response approved",
+            )
+        )
+        result.report.notes.append("Response approved by approver.")
         return response, result
 
     def _run_task(self, task: PlanTask) -> List[EvidenceItem]:

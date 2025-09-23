@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS kb_documents (
     id SERIAL PRIMARY KEY,
     external_id TEXT UNIQUE,
