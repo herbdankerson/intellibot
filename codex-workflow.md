@@ -155,7 +155,7 @@ Codex CLI runs pre-commit before committing to avoid noisy CI fails.
 * **Local**: `.env` + `.env.example` (no secrets in git).
 * **GitHub**: environments `dev` and `prod` with secrets:
 
-  * `OPENAI_KEY_*`, `ANTHROPIC_KEY`, `GOOGLE_API_KEY`, `COHERE_KEY`, `DATABASE_URL`.
+  * `GOOGLE_API_KEY`, `LITELLM_MASTER_KEY`, `LITELLM_VIRTUAL_KEY`, `DATABASE_URL`, `AGENTS_CONFIG_DIR`.
 * GitHub Actions uses **environment protection rules**: merges to `main` require manual approval.
 
 # 10) Codex ↔ Codex “handoff” pattern

@@ -5,12 +5,45 @@ servers:
     token_env: POSTGRES_MCP_TOKEN
     tools:
       - db_search
-  neo4j:
-    url: http://localhost:4060
-    token_env: NEO4J_MCP_TOKEN
-    tools:
-      - graph_search
   web:
     url: http://localhost:4070
     tools:
       - web_search
+  legal:
+    url: http://mcp-gateway-legal:8080
+    tools:
+      - ingest_websites
+      - search
+      - fetch
+  neo4j-cypher:
+    url: http://mcp-gateway-neo4j-cypher:8080
+    tools:
+      - get_neo4j_schema
+      - read_neo4j_cypher
+      - write_neo4j_cypher
+  neo4j-memory:
+    url: http://mcp-gateway-neo4j-memory:8080
+    tools:
+      - add_observations
+      - create_entities
+      - create_relations
+      - delete_entities
+      - delete_observations
+      - delete_relations
+      - find_memories_by_name
+      - read_graph
+      - search_memories
+  neo4j-modeling:
+    url: http://mcp-gateway-neo4j-modeling:8080
+    tools:
+      - export_to_arrows_json
+      - get_constraints_cypher_queries
+      - get_example_data_model
+      - get_mermaid_config_str
+      - get_node_cypher_ingest_query
+      - get_relationship_cypher_ingest_query
+      - list_example_data_models
+      - load_from_arrows_json
+      - validate_data_model
+      - validate_node
+      - validate_relationship

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from ..agents import AgentConfig, get_agent_config
 from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..schemas import AgentResponse, EvidenceItem, EvidencePack
@@ -24,29 +25,44 @@ class Responder:
 
     model_name: str = "responder"
     client: LLMClient | None = None
+    agent_config: AgentConfig | None = None
 
     def __post_init__(self) -> None:
+        settings = get_settings()
+        if self.agent_config is None:
+            self.agent_config = get_agent_config("responder")
+        model_aliases = settings.model_aliases()
+        model_key = self.agent_config.model if self.agent_config else self.model_name
+        target_model = model_aliases.get(model_key, model_key)
         if self.client is None:
-            settings = get_settings()
-            model_aliases = settings.model_aliases()
-            target_model = model_aliases.get("responder", self.model_name)
             self.client = LLMClient(model_name=target_model)
 
     def respond(self, message: str, evidence_pack: EvidencePack) -> AgentResponse:
         """Return the final response payload for the caller."""
+
+        agent_config = self.agent_config or get_agent_config("responder")
+        if self.agent_config is None:
+            self.agent_config = agent_config
 
         owns_client = False
         responder_client = self.client
         if responder_client is None:
             owns_client = True
             settings = get_settings()
-            target_model = settings.model_aliases().get("responder", self.model_name)
+            model_aliases = settings.model_aliases()
+            model_key = agent_config.model if agent_config else self.model_name
+            target_model = model_aliases.get(model_key, model_key)
             responder_client = LLMClient(model_name=target_model)
 
         try:
-            response_text = responder_client.chat(
-                _build_messages(message, evidence_pack)
-            )
+            messages = _build_messages(message, evidence_pack)
+            if isinstance(responder_client, LLMClient):
+                response_text = responder_client.chat(
+                    messages,
+                    agent_config=agent_config,
+                )
+            else:  # accommodate test doubles without keyword support
+                response_text = responder_client.chat(messages)
         finally:
             if owns_client:
                 responder_client.close()

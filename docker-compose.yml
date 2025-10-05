@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   paradedb:
     image: paradedb/paradedb:latest
@@ -12,6 +10,22 @@ services:
     volumes:
       - paradedb-data:/var/lib/postgresql/data
 
+  neo4j:
+    image: neo4j:5.22
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_initial__size: 512M
+      NEO4J_server_memory_heap_max__size: 1G
+    ports:
+      - "7475:7474"
+      - "7688:7687"
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-plugins:/plugins
+
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     command: ["--config", "/app/config.yaml", "--port", "4000"]
@@ -20,13 +34,28 @@ services:
     env_file:
       - .env
     environment:
-      LITELLM_MASTER_KEY: ${OPENAI_KEY_1:-changeme}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-changeme-master}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      COHERE_KEY: ${COHERE_KEY:-}
     volumes:
       - ./ops/litellm/config.yaml:/app/config.yaml:ro
     depends_on:
       - paradedb
+
+  docling:
+    image: ghcr.io/docling-project/docling-serve-cpu:latest
+    restart: unless-stopped
+    environment:
+      DOCLING_SERVE_ENABLE_UI: "false"
+    ports:
+      - "8000:5001"
+    volumes:
+      - docling-cache:/opt/app-root/src/.cache
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   prefect:
     image: prefecthq/prefect:3-latest
@@ -44,7 +73,7 @@ services:
       - .env
     environment:
       OPENAI_API_BASE: http://litellm:4000
-      OPENAI_API_KEY: ${OPENAI_KEY_1:-changeme}
+      OPENAI_API_KEY: ${LITELLM_VIRTUAL_KEY:-changeme-virtual}
     ports:
       - "3000:3000"
     depends_on:
@@ -56,7 +85,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://agent:agentpass@paradedb:5432/agentdb
-      POSTGRES_MCP_TOKEN: ${POSTGRES_MCP_TOKEN:-dev-token}
+      POSTGRES_MCP_TOKEN: ${POSTGRES_MCP_TOKEN:-abc123xyz789}
     command: >
       sh -c "pip install --no-cache-dir postgres-mcp && postgres-mcp $${DATABASE_URL} --transport sse --sse-host 0.0.0.0 --sse-port 4050"
     depends_on:
@@ -64,6 +93,134 @@ services:
     ports:
       - "4050:4050"
 
+  mcp-relay:
+    build: ./ops/mcp-relay
+    depends_on:
+      - postgres-mcp
+    environment:
+      RELAY_BEARER_TOKEN: ${POSTGRES_MCP_TOKEN:-abc123xyz789}
+      UPSTREAM_SSE_URL: http://postgres-mcp:4050/sse
+      UPSTREAM_HEALTH_URL: http://postgres-mcp:4050/health
+
+  legal-mcp:
+    build:
+      context: ./mcp/legal-knowledge-base
+    env_file:
+      - .env
+    environment:
+      PGHOST: paradedb
+      PGPORT: "5432"
+      PGDATABASE: agentdb
+      PGUSER: agent
+      PGPASSWORD: agentpass
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-changeme-master}
+      MCP_PUBLIC_ENDPOINT: ${MCP_PUBLIC_ENDPOINT:-https://legal-mcp.dankersons.com/mcp/}
+    depends_on:
+      - paradedb
+      - litellm
+    ports:
+      - "8100:8000"
+    volumes:
+      - ./mcp/legal-knowledge-base/data:/app/data
+      - ./mcp/legal-knowledge-base/db:/app/db
+
+  mcp-gateway-legal:
+    image: nginx:1.27-alpine
+    depends_on:
+      - legal-mcp
+    ports:
+      - "8200:8080"
+    volumes:
+      - ./ops/mcp/legal-gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  neo4j-cypher-mcp:
+    image: mcp/neo4j-cypher:latest
+    restart: unless-stopped
+    environment:
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_USERNAME: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DATABASE: ${NEO4J_DATABASE}
+      NEO4J_TRANSPORT: http
+      NEO4J_MCP_SERVER_HOST: 0.0.0.0
+      NEO4J_MCP_SERVER_PORT: 8080
+      NEO4J_MCP_SERVER_PATH: /mcp/
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: localhost,127.0.0.1,mcp-gateway-neo4j-cypher,neo4j-cypher-mcp,neo4j-cypher-mcp.dankersons.com
+    depends_on:
+      - neo4j
+
+  neo4j-memory-mcp:
+    image: mcp/neo4j-memory:latest
+    restart: unless-stopped
+    environment:
+      NEO4J_URL: bolt://neo4j:7687
+      NEO4J_USERNAME: ${NEO4J_USER}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DATABASE: ${NEO4J_DATABASE}
+      NEO4J_TRANSPORT: http
+      NEO4J_MCP_SERVER_HOST: 0.0.0.0
+      NEO4J_MCP_SERVER_PORT: 8080
+      NEO4J_MCP_SERVER_PATH: /mcp/
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: localhost,127.0.0.1,mcp-gateway-neo4j-memory,neo4j-memory-mcp,neo4j-memory-mcp.dankersons.com
+    depends_on:
+      - neo4j
+
+  neo4j-modeling-mcp:
+    image: mcp/neo4j-data-modeling:latest
+    restart: unless-stopped
+    environment:
+      NEO4J_TRANSPORT: http
+      NEO4J_MCP_SERVER_HOST: 0.0.0.0
+      NEO4J_MCP_SERVER_PORT: 8080
+      NEO4J_MCP_SERVER_PATH: /mcp/
+      NEO4J_MCP_SERVER_ALLOWED_HOSTS: localhost,127.0.0.1,mcp-gateway-neo4j-modeling,neo4j-modeling-mcp,neo4j-modeling-mcp.dankersons.com
+
+  mcp-gateway-neo4j-cypher:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - neo4j-cypher-mcp
+    volumes:
+      - ./ops/mcp/neo4j-cypher/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/mcp/neo4j-cypher/manifest.json:/etc/nginx/manifests/neo4j-cypher.json:ro
+
+  mcp-gateway-neo4j-memory:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - neo4j-memory-mcp
+    volumes:
+      - ./ops/mcp/neo4j-memory/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/mcp/neo4j-memory/manifest.json:/etc/nginx/manifests/neo4j-memory.json:ro
+
+  mcp-gateway-neo4j-modeling:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - neo4j-modeling-mcp
+    volumes:
+      - ./ops/mcp/neo4j-modeling/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/mcp/neo4j-modeling/manifest.json:/etc/nginx/manifests/neo4j-modeling.json:ro
+
+  cloudflared:
+    build:
+      context: ./ops/cloudflared
+    depends_on:
+      - mcp-gateway-legal
+      - mcp-gateway-neo4j-cypher
+      - mcp-gateway-neo4j-memory
+      - mcp-gateway-neo4j-modeling
+    command: ["tunnel", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN}"]
+    environment:
+      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    volumes:
+      - ./ops/cloudflared/dankersons-mcp.yml:/etc/cloudflared/config.yml:ro
+
 volumes:
   paradedb-data:
   prefect-data:
+  neo4j-data:
+  neo4j-logs:
+  neo4j-plugins:
+  docling-cache:

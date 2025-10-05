@@ -1,0 +1,56 @@
+# Environment and secrets
+.env
+.env.local
+*.env
+!/.env.example
+!/.env.test
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.build/
+dist/
+build/
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Editor artifacts
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Archives and bundles
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.gz
+
+# Temporary/runtime
+/tmp/
+tmp/
+logs/
+*.log
+
+# Local assets not for source control
+pro2codex-EXAMPLE-ONLY/
+pro2codex-*.zip
+etl_scaffold.zip
+ops/cloudflared/cloudflared
+
+# MCP data staging (keep directory structure via .gitkeep)
+mcp/legal-knowledge-base/data/inbox/*
+!mcp/legal-knowledge-base/data/inbox/.gitkeep
+mcp/legal-knowledge-base/data/parsed/*
+!mcp/legal-knowledge-base/data/parsed/.gitkeep

@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, Optional
 
 import httpx
 
+from ..agents import AgentConfig
 from ..config import get_settings
 
 LOGGER = logging.getLogger(__name__)
@@ -58,6 +59,15 @@ class LLMClient:
     def chat(self, messages: Iterable[LLMMessage], **kwargs: Any) -> str:
         """Send chat completion request to LiteLLM and return the text response."""
 
+        agent_config: Optional[AgentConfig] = kwargs.pop("agent_config", None)
+        include_thoughts_request = bool(kwargs.pop("include_thoughts", False))
+        thinking_budget_override: Optional[int] = kwargs.pop(
+            "thinking_budget_override", None
+        )
+        generation_config_override: Optional[Dict[str, Any]] = kwargs.pop(
+            "generation_config_override", None
+        )
+
         payload: Dict[str, Any] = {
             "model": self.model_name,
             "messages": [message.as_dict() for message in messages],
@@ -65,6 +75,38 @@ class LLMClient:
         }
         if kwargs:
             payload.update(kwargs)
+
+        include_thoughts = include_thoughts_request
+        if agent_config is not None:
+            include_thoughts = include_thoughts or agent_config.include_thoughts
+
+        extra_body = payload.setdefault("extra_body", {})
+        if not isinstance(extra_body, dict):  # pragma: no cover - defensive
+            extra_body = {}
+            payload["extra_body"] = extra_body
+
+        generation_config: Optional[Dict[str, Any]]
+        if generation_config_override is not None:
+            generation_config = generation_config_override
+        elif agent_config is not None:
+            generation_config = agent_config.build_generation_payload(
+                max_output_override=payload.get("max_output_tokens")
+                or payload.get("max_tokens"),
+                thinking_budget_override=thinking_budget_override,
+                include_thoughts_override=include_thoughts,
+            )
+        else:
+            generation_config = None
+
+        if generation_config is not None:
+            if include_thoughts:
+                generation_config.setdefault("responseModalities", ["TEXT"])
+            extra_body.setdefault("generationConfig", generation_config)
+        elif include_thoughts:
+            extra_body.setdefault(
+                "generationConfig", {"responseModalities": ["TEXT"]}
+            )
+
         LOGGER.debug("liteLLM chat request", extra={"model": self.model_name})
         response = self._client.post(
             "/v1/chat/completions",

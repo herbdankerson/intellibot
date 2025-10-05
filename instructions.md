@@ -28,6 +28,7 @@ my_agentic_chatbot/
 │
 ├─ ops/
 │  ├─ litellm/config.yaml          # models, embeddings, routing, keys, limits
+│  ├─ agents/                      # per-agent generation configs (yaml)
 │  ├─ mcp/servers.yaml             # MCP endpoints & auth (pg, neo4j, web)
 │  ├─ prefect/deployment.yaml      # (optional) Prefect deployment
 │  └─ scripts/
@@ -204,38 +205,50 @@ my_agentic_chatbot/
 * **Multiple keys** per provider supported; **round-robin** or **failover** on 429/quota.
 * **Virtual models**: map `planner`, `responder`, `cheap-worker`; map `emb-general`, `emb-code`, `emb-law`.
 * Route per request (explicit `model`) or via **policy** (virtual model names).
+* Each agent’s Gemini guardrails (max tokens, thinking mode, response mime type) live in `ops/agents/<agent>.yaml`; runtime loads these on every call.
 
 **Sample `ops/litellm/config.yaml`**
 
 ```yaml
-litellm_settings:
-  key_management: round_robin
-  timeout: 60
-  max_retries: 2
-  retry_backoff: 2
-
-routing_strategy: failover
-
 model_list:
   # Chat roles (virtual)
   - model_name: planner
-    litellm_params: { model: claude-3-5-sonnet, api_key: ${ANTHROPIC_KEY} }
-  - model_name: planner
-    litellm_params: { model: gpt-4o, api_key: ${OPENAI_KEY_1} }
-
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      temperature: 0
+      max_output_tokens: 65536
   - model_name: responder
-    litellm_params: { model: gpt-4o, api_key: ${OPENAI_KEY_2} }
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      temperature: 0
+      max_output_tokens: 65536
 
   - model_name: cheap-worker
-    litellm_params: { model: gpt-4o-mini, api_key: ${OPENAI_KEY_3} }
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      temperature: 0.2
+      max_output_tokens: 65536
 
   # Embedding spaces
   - model_name: emb-general
-    litellm_params: { model: text-embedding-004, api_key: ${GOOGLE_API_KEY} }
+    litellm_params: { model: gemini/text-embedding-004 }
   - model_name: emb-code
-    litellm_params: { model: text-embedding-3-large, api_key: ${OPENAI_KEY_1} }
+    litellm_params: { model: gemini/text-embedding-004 }
   - model_name: emb-law
-    litellm_params: { model: cohere/embed-english-v3.0, api_key: ${COHERE_KEY} }
+    litellm_params: { model: gemini/text-embedding-004 }
+```
+
+**Sample `ops/agents/planner.yaml`**
+
+```yaml
+name: planner
+model: planner
+include_thoughts: true
+generation:
+  response_mime_type: text/plain
+  max_output_tokens: 65536
+  thinking_mode: dynamic  # translates to Gemini thinkingBudget = -1
+  thinking_budget_tokens: 32768
 ```
 
 ---
@@ -373,14 +386,14 @@ embed:
 ## 16) Environment Variables (`.env.example`)
 
 ```
-OPENAI_KEY_1=
-OPENAI_KEY_2=
-ANTHROPIC_KEY=
 GOOGLE_API_KEY=
-COHERE_KEY=
+
+LITELLM_MASTER_KEY=
+LITELLM_VIRTUAL_KEY=
 
 DATABASE_URL=postgresql://user:pass@localhost:5432/agentdb  # pragma: allowlist secret
 
+AGENTS_CONFIG_DIR=ops/agents
 POSTGRES_MCP_TOKEN=
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j

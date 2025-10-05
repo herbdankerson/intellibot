@@ -1,0 +1,48 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://intellibot.local/schemas/agent.schema.json
+
+title: AgentConfig
+description: Configuration for a chat agent role
+
+required:
+  - name
+  - model
+  - generation
+
+properties:
+  name:
+    type: string
+    description: Logical identifier for the agent (e.g. planner)
+  model:
+    type: string
+    description: LiteLLM model alias to request for this agent
+  include_thoughts:
+    type: boolean
+    default: false
+    description: Whether to request Gemini thought summaries for this agent
+  generation:
+    type: object
+    description: Gemini generation config overrides
+    required:
+      - response_mime_type
+      - max_output_tokens
+      - thinking_mode
+    properties:
+      response_mime_type:
+        type: string
+        enum: [text/plain]
+        description: Requested mime type for Gemini responses
+      max_output_tokens:
+        type: integer
+        minimum: 1
+        maximum: 65536
+        description: Max tokens agent is allowed to request
+      thinking_mode:
+        type: string
+        enum: [dynamic, disabled, fixed]
+        description: Thinking configuration preset
+      thinking_budget_tokens:
+        type: integer
+        minimum: 128
+        maximum: 32768
+        description: Token budget used when thinking_mode is fixed

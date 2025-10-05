@@ -58,11 +58,9 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", populate_by_name=True
     )
 
-    openai_key_primary: Optional[str] = Field(default=None, alias="OPENAI_KEY_1")
-    openai_key_secondary: Optional[str] = Field(default=None, alias="OPENAI_KEY_2")
-    anthropic_key: Optional[str] = Field(default=None, alias="ANTHROPIC_KEY")
     google_api_key: Optional[str] = Field(default=None, alias="GOOGLE_API_KEY")
-    cohere_key: Optional[str] = Field(default=None, alias="COHERE_KEY")
+    litellm_master_key: Optional[str] = Field(default=None, alias="LITELLM_MASTER_KEY")
+    litellm_virtual_key: Optional[str] = Field(default=None, alias="LITELLM_VIRTUAL_KEY")
 
     database_url: str = Field(
         default="postgresql://user:pass@localhost:5432/agentdb",
@@ -83,6 +81,7 @@ class Settings(BaseSettings):
         default=60.0, alias="LITELLM_TIMEOUT_SECONDS"
     )
     mcp_servers_path: str = Field(default="ops/mcp/servers.yaml", alias="MCP_SERVERS_PATH")
+    agents_config_dir: str = Field(default="ops/agents", alias="AGENTS_CONFIG_DIR")
     prefect_api_url: Optional[str] = Field(default=None, alias="PREFECT_API_URL")
     prefect_server_ephemeral_enabled: bool = Field(
         default=True, alias="PREFECT_SERVER_EPHEMERAL_ENABLED"
@@ -95,8 +94,8 @@ class Settings(BaseSettings):
         """Return default headers for LiteLLM proxy calls."""
 
         headers: Dict[str, str] = {}
-        if self.openai_key_primary:
-            headers["Authorization"] = f"Bearer {self.openai_key_primary}"
+        if self.litellm_virtual_key:
+            headers["Authorization"] = f"Bearer {self.litellm_virtual_key}"
         return headers
 
     def model_aliases(self) -> Dict[str, str]:

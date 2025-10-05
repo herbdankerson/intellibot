@@ -1,0 +1,9 @@
+fastapi
+fastmcp
+uvicorn
+psycopg[binary]
+requests
+python-dotenv
+python-slugify
+beautifulsoup4
+nltk

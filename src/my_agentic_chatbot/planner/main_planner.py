@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+from ..agents import get_agent_config
 from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..schemas import Plan
@@ -50,13 +51,19 @@ def plan_from_message(
         raise ValueError("Planner requires a non-empty message")
 
     settings = get_settings()
+    agent_config = get_agent_config("planner")
     model_aliases = settings.model_aliases()
-    target_model = model_aliases.get(model or "planner", model or settings.planner_model)
+    model_key = model or agent_config.model
+    target_model = model_aliases.get(model_key, model_key)
 
     owns_client = client is None
     planner_client = client or LLMClient(model_name=target_model)
     try:
-        response = planner_client.chat(_build_messages(normalized))
+        messages = _build_messages(normalized)
+        if isinstance(planner_client, LLMClient):
+            response = planner_client.chat(messages, agent_config=agent_config)
+        else:  # test doubles may not accept agent_config keyword
+            response = planner_client.chat(messages)
     finally:
         if owns_client:
             planner_client.close()
