@@ -41,6 +41,20 @@ services:
     depends_on:
       - paradedb
 
+  openai-proxy:
+    build:
+      context: .
+      dockerfile: ops/openai-proxy/Dockerfile
+    env_file:
+      - .env
+    environment:
+      LITELLM_ROUTER_BASE_URL: http://litellm:4000
+      OPENAI_PROXY_TIMEOUT: ${LITELLM_TIMEOUT_SECONDS:-60}
+    depends_on:
+      - litellm
+    ports:
+      - "5001:5000"
+
   docling:
     image: ghcr.io/docling-project/docling-serve-cpu:latest
     restart: unless-stopped
@@ -72,12 +86,13 @@ services:
     env_file:
       - .env
     environment:
-      OPENAI_API_BASE: http://litellm:4000
+      OPENAI_API_BASE: http://openai-proxy:5000
       OPENAI_API_KEY: ${LITELLM_VIRTUAL_KEY:-changeme-virtual}
     ports:
       - "3000:3000"
     depends_on:
       - litellm
+      - openai-proxy
 
   postgres-mcp:
     image: python:3.12-slim

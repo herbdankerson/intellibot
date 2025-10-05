@@ -203,6 +203,7 @@ my_agentic_chatbot/
 
 * **Proxy** exposes OpenAI-compatible `/v1/chat/completions` and `/v1/embeddings`.
 * **Multiple keys** per provider supported; **round-robin** or **failover** on 429/quota.
+* Populate `GOOGLE_API_KEY` plus `GOOGLE_API_KEY_1..5` (or more) in `.env` to feed the Gemini key pool used for failover.
 * **Virtual models**: map `planner`, `responder`, `cheap-worker`; map `emb-general`, `emb-code`, `emb-law`.
 * Route per request (explicit `model`) or via **policy** (virtual model names).
 * Each agent’s Gemini guardrails (max tokens, thinking mode, response mime type) live in `ops/agents/<agent>.yaml`; runtime loads these on every call.
@@ -225,7 +226,7 @@ model_list:
 
   - model_name: cheap-worker
     litellm_params:
-      model: gemini/gemini-2.5-pro
+      model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
 
@@ -250,6 +251,11 @@ generation:
   thinking_mode: dynamic  # translates to Gemini thinkingBudget = -1
   thinking_budget_tokens: 32768
 ```
+
+### OpenAI-compatible Proxy
+
+* `openai-proxy` (FastAPI) runs in Docker Compose and forwards `/v1` OpenAI-compatible requests to LiteLLM.
+* Point Open WebUI (and other SDKs) at `http://openai-proxy:5000` using the LiteLLM **virtual** key; the proxy fans out to Gemini 2.5 pools defined in `ops/litellm/config.yaml`.
 
 ---
 

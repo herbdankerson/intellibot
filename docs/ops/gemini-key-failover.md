@@ -1,17 +1,26 @@
 # Gemini Key Failover
 
-The LiteLLM proxy exposes a router callback hook named `gemini_failover` that can
-promote Google Gemini 2.5 Pro as the secondary provider when the primary OpenAI
-model fails. The callback placeholder lives in `ops/litellm/callbacks/gemini_failover.py`
-so ops teams can extend it without touching application code.
+LiteLLM now handles Gemini failover using its native router logic—no custom
+callback code required. Each Gemini-backed virtual model (`planner`,
+`responder`, `cheap-worker`, and the embedding aliases) is declared multiple
+times in `ops/litellm/config.yaml`, once per API key. When a call returns a
+quota or rate error, LiteLLM automatically retries with the next key in the
+list.
 
-To enable the callback:
+## Configure the key pool
 
-1. Add valid Gemini API credentials to `.env` (`GOOGLE_API_KEY`).
-2. Mount the repository's `ops/litellm` directory inside the LiteLLM container.
-3. Implement retry/failover logic in `gemini_failover` as needed.
-4. Restart the LiteLLM service so the config and callback module are reloaded.
+1. Add your Gemini keys to `.env` using the numbered variables:
+   - `GOOGLE_API_KEY` (primary)
+   - `GOOGLE_API_KEY_1` ... `GOOGLE_API_KEY_5`
+   - Extend the list if you have more keys by following the same pattern.
+2. Restart the LiteLLM service (`docker compose restart litellm`) so the proxy
+   picks up the refreshed configuration.
 
-The LiteLLM configuration already includes the `gemini-fallback` model and registers
-the callback. Once the logic is filled in, the proxy will route failed planner or
-responder calls through Gemini automatically.
+The router is locked to Gemini 2.5 models:
+
+- `gemini/gemini-2.5-pro` powers the `planner` and `responder` agents.
+- `gemini/gemini-2.5-flash` backs the `cheap-worker` helper.
+- `gemini/text-embedding-004` handles all embedding aliases.
+
+With `litellm_settings.num_retries` set, the proxy will transparently fail over
+across the configured keys before surfacing an error to clients.
