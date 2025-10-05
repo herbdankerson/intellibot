@@ -55,6 +55,29 @@ services:
     ports:
       - "5001:5000"
 
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      OPENAI_API_BASE: http://openai-proxy:5000
+      OPENAI_API_KEY: ${LITELLM_VIRTUAL_KEY:-changeme-virtual}
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
+      HF_HUB_DISABLE_HF_TRANSFER: "1"
+      USE_OLLAMA: "false"
+      USE_OLLAMA_DOCKER: "false"
+      USE_RERANKING_MODEL_DOCKER: ""
+      OFFLINE_MODE: "true"
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "false"
+      RAG_EMBEDDING_MODEL: "sentence-transformers/all-MiniLM-L6-v2"
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+    ports:
+      - "3000:8080"
+    depends_on:
+      - paradedb
+      - openai-proxy
+
   docling:
     image: ghcr.io/docling-project/docling-serve-cpu:latest
     restart: unless-stopped
@@ -80,19 +103,6 @@ services:
       - "4200:4200"
     volumes:
       - prefect-data:/root/.prefect
-
-  openwebui:
-    image: ghcr.io/open-webui/open-webui:latest
-    env_file:
-      - .env
-    environment:
-      OPENAI_API_BASE: http://openai-proxy:5000
-      OPENAI_API_KEY: ${LITELLM_VIRTUAL_KEY:-changeme-virtual}
-    ports:
-      - "3000:3000"
-    depends_on:
-      - litellm
-      - openai-proxy
 
   postgres-mcp:
     image: python:3.12-slim

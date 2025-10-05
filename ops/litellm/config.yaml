@@ -1,8 +1,8 @@
 litellm_settings:
-  num_retries: 3
-  retry_timeout: 2
   drop_params: true
-  fallback_strategy: retry
+
+router_settings:
+  num_retries: 4
 
 model_list:
   - model_name: planner
@@ -10,151 +10,151 @@ model_list:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: planner
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: planner
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: planner
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: planner
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: responder
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: responder
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: responder
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: responder
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: responder
     litellm_params:
       model: gemini/gemini-2.5-pro
       temperature: 0
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: cheap-worker
     litellm_params:
       model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: cheap-worker
     litellm_params:
       model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: cheap-worker
     litellm_params:
       model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: cheap-worker
     litellm_params:
       model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: cheap-worker
     litellm_params:
       model: gemini/gemini-2.5-flash
       temperature: 0.2
       max_output_tokens: 65536
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-general
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-general
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-general
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-general
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-general
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-code
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-code
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-code
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-code
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-code
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-law
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_1:-}
+      api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-law
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_2:-}
+      api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-law
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_3:-}
+      api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-law
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_4:-}
+      api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-law
     litellm_params:
       model: gemini/text-embedding-004
-      api_key: ${GOOGLE_API_KEY_5:-}
+      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: voyage-law-2
     litellm_params:
       model: voyage-law-2
