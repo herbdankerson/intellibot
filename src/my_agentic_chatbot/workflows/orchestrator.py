@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - exercised via integration tests when Prefect is available
     from prefect import flow, get_run_logger, task
@@ -59,6 +60,7 @@ from ..schemas import (
 from ..tools.db_tools import DatabaseTool
 from ..tools.graph_tools import GraphTool
 from ..tools.web_tools import WebTool
+from ..run_logging import AgentRunLogger
 from ..util.text import (
     clip_to_token_budget,
     deduplicate_items,
@@ -72,6 +74,19 @@ from .audit import AuditAgent
 from .workflow_designer import WorkflowDesigner, WorkflowNode, WorkflowNodeType
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _safe_task_inputs(raw: object) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    safe: Dict[str, Any] = {}
+    for key, value in raw.items():
+        try:
+            json.dumps(value)
+            safe[str(key)] = value
+        except TypeError:
+            safe[str(key)] = str(value)
+    return safe
 
 
 @dataclass
@@ -93,6 +108,7 @@ class FlowRuntime:
     approver: Approver
     designer: WorkflowDesigner
     audit_agent: Optional[AuditAgent] = None
+    logger: Optional[AgentRunLogger] = None
 
 
 @dataclass
@@ -114,6 +130,7 @@ def workflow_runtime(
     approver: Approver,
     designer: WorkflowDesigner,
     audit_agent: Optional[AuditAgent],
+    logger: Optional[AgentRunLogger],
 ):
     global _RUNTIME
     previous = _RUNTIME
@@ -123,6 +140,7 @@ def workflow_runtime(
         approver=approver,
         designer=designer,
         audit_agent=audit_agent,
+        logger=logger,
     )
     try:
         yield
@@ -186,13 +204,22 @@ def _audit_response_task(
 ) -> AuditReport | None:
     runtime = _get_runtime()
     if runtime.audit_agent is None or response is None:
+        if runtime.logger is not None:
+            runtime.logger.log_event(
+                "audit_skipped",
+                {"reason": "audit_agent_unavailable"},
+                status="skipped",
+            )
         return None
-    return runtime.audit_agent.evaluate(
+    audit_report = runtime.audit_agent.evaluate(
         question=message,
         plan=plan,
         evidence=pack,
         response=response,
     )
+    if runtime.logger is not None:
+        runtime.logger.log_audit(audit_report)
+    return audit_report
 
 
 def _resolve_task_result(value):
@@ -203,9 +230,24 @@ def _resolve_task_result(value):
 def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> FlowOutput:
     runtime = _get_runtime()
     logger = get_run_logger()
+    run_logger = runtime.logger
+    if run_logger is not None:
+        run_logger.log_event(
+            "workflow_started",
+            {"deliver_response": deliver_response},
+        )
     report = ExecutionReport(run_id=generate_run_id())
 
     plan_decision = _resolve_task_result(_approve_plan(plan))
+    if run_logger is not None:
+        run_logger.log_event(
+            "plan_approval",
+            {
+                "approved": plan_decision.approved,
+                "reason": plan_decision.reason,
+            },
+            status="approved" if plan_decision.approved else "rejected",
+        )
     if not plan_decision.approved:
         reason = plan_decision.reason or "Plan rejected"
         report.successful = False
@@ -213,6 +255,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         report.record(
             ExecutionEvent(task_id="plan", status=TaskStatus.FAILED, message=reason)
         )
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_aborted",
+                {"reason": reason},
+                status="plan_rejected",
+            )
         empty_pack = EvidencePack()
         return FlowOutput(
             response=None,
@@ -221,6 +269,21 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
 
     try:
         workflow_graph = runtime.designer.build_graph(plan)
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_graph_built",
+                {
+                    "nodes": [
+                        {
+                            "id": node.id,
+                            "tool": node.task.tool,
+                            "dependencies": node.dependencies,
+                            "max_attempts": node.max_attempts,
+                        }
+                        for node in workflow_graph.nodes.values()
+                    ]
+                },
+            )
     except ValueError as exc:
         logger.exception("Workflow designer failed to build graph")
         report.successful = False
@@ -232,6 +295,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 message="Workflow designer failed",
             )
         )
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_aborted",
+                {"reason": "workflow_designer_error", "details": str(exc)},
+                status="designer_error",
+            )
         empty_pack = EvidencePack()
         return FlowOutput(
             response=None,
@@ -268,6 +337,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             )
             skipped.add(node.id)
             status_map[node.id] = TaskStatus.SKIPPED
+            if run_logger is not None:
+                run_logger.log_event(
+                    "task_skipped",
+                    {"reason": note},
+                    task_id=node.id,
+                    tool=node.task.tool,
+                    status="skipped",
+                )
             continue
 
         if not node.should_run(status_map):
@@ -280,6 +357,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             )
             skipped.add(node.id)
             status_map[node.id] = TaskStatus.SKIPPED
+            if run_logger is not None:
+                run_logger.log_event(
+                    "task_skipped",
+                    {"reason": "branch_conditions"},
+                    task_id=node.id,
+                    tool=node.task.tool,
+                    status="skipped",
+                )
             continue
 
         policy_decision = policies.enforce_task_limits(node.task)
@@ -295,6 +380,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             report.notes.append(f"Policy rejected {node.id}: {reason}")
             failed.add(node.id)
             status_map[node.id] = TaskStatus.FAILED
+            if run_logger is not None:
+                run_logger.log_tool_result(
+                    task_id=node.id,
+                    tool=node.task.tool,
+                    status="policy_rejected",
+                    inputs=_safe_task_inputs(node.task.inputs),
+                    error=reason,
+                )
             continue
 
         if node.task.requires_approval:
@@ -310,6 +403,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 )
                 failed.add(node.id)
                 status_map[node.id] = TaskStatus.FAILED
+                if run_logger is not None:
+                    run_logger.log_event(
+                        "task_rejected",
+                        {"reason": note},
+                        task_id=node.id,
+                        tool=node.task.tool,
+                        status="rejected",
+                    )
                 continue
 
         report.record(
@@ -319,6 +420,17 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 message=f"tool={node.task.tool}, attempts={node.max_attempts}",
             )
         )
+        if run_logger is not None:
+            run_logger.log_event(
+                "task_started",
+                {
+                    "attempts": node.max_attempts,
+                    "inputs": _safe_task_inputs(node.task.inputs),
+                },
+                task_id=node.id,
+                tool=node.task.tool,
+                status="running",
+            )
         try:
             outputs = _execute_with_retries(node)
         except Exception as exc:  # pragma: no cover - defensive
@@ -335,6 +447,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             )
             failed.add(node.id)
             status_map[node.id] = TaskStatus.FAILED
+            if run_logger is not None:
+                run_logger.log_tool_result(
+                    task_id=node.id,
+                    tool=node.task.tool,
+                    status="failed",
+                    inputs=_safe_task_inputs(node.task.inputs),
+                    error=str(exc),
+                )
             continue
         collected.extend(outputs)
         completed.add(node.id)
@@ -346,12 +466,31 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 message=f"items={len(outputs)}",
             )
         )
+        if run_logger is not None:
+            run_logger.log_tool_result(
+                task_id=node.id,
+                tool=node.task.tool,
+                status="completed",
+                inputs=_safe_task_inputs(node.task.inputs),
+                outputs=outputs,
+            )
 
     if skipped:
         report.notes.append("Skipped tasks: " + ", ".join(sorted(skipped)))
 
     evidence_pack = _resolve_task_result(_assemble_evidence_task(collected))
+    if run_logger is not None:
+        run_logger.log_evidence(evidence_pack)
     evidence_decision = _resolve_task_result(_approve_evidence_task(evidence_pack))
+    if run_logger is not None:
+        run_logger.log_event(
+            "evidence_approval",
+            {
+                "approved": evidence_decision.approved,
+                "reason": evidence_decision.reason,
+            },
+            status="approved" if evidence_decision.approved else "rejected",
+        )
     if not evidence_decision.approved:
         reason = evidence_decision.reason or "Evidence pack rejected"
         report.record(
@@ -363,6 +502,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         )
         report.notes.append(f"Evidence rejected: {reason}")
         report.successful = False
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_aborted",
+                {"reason": reason},
+                status="evidence_rejected",
+            )
         return FlowOutput(
             response=None,
             result=ExecutionResult(evidence=evidence_pack, report=report),
@@ -377,6 +522,8 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         return FlowOutput(response=None, result=result)
 
     response = _resolve_task_result(_generate_response_task(message, evidence_pack))
+    if run_logger is not None and response is not None:
+        run_logger.log_response(response)
     audit_report = _resolve_task_result(
         _audit_response_task(message, plan, evidence_pack, response)
     )
@@ -391,6 +538,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         )
         report.notes.append(summary)
         report.successful = False
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_aborted",
+                {"reason": summary},
+                status="audit_failed",
+            )
         blocking_finding = next(
             (
                 finding
@@ -426,6 +579,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         )
         report.successful = False
         report.notes.append(note)
+        if run_logger is not None:
+            run_logger.log_event(
+                "workflow_aborted",
+                {"reason": reason},
+                status="response_rejected",
+            )
         fallback = AgentResponse(
             answer="Final response requires revision before delivery.",
             citations=[],
@@ -600,13 +759,20 @@ class WorkflowOrchestrator:
         with context:
             yield
 
-    def execute_plan(self, plan: Plan, *, message: str | None = None) -> ExecutionResult:
+    def execute_plan(
+        self,
+        plan: Plan,
+        *,
+        message: str | None = None,
+        run_logger: AgentRunLogger | None = None,
+    ) -> ExecutionResult:
         with workflow_runtime(
             self.tools,
             self.responder,
             self.approver,
             self.designer,
             self.audit_agent,
+            run_logger,
         ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(
@@ -616,13 +782,20 @@ class WorkflowOrchestrator:
                 )
         return output.result
 
-    def run_pipeline(self, message: str, plan: Plan) -> Tuple[AgentResponse, ExecutionResult]:
+    def run_pipeline(
+        self,
+        message: str,
+        plan: Plan,
+        *,
+        run_logger: AgentRunLogger | None = None,
+    ) -> Tuple[AgentResponse, ExecutionResult]:
         with workflow_runtime(
             self.tools,
             self.responder,
             self.approver,
             self.designer,
             self.audit_agent,
+            run_logger,
         ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(

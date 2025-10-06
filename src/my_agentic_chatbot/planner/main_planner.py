@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable
 from ..agents import get_agent_catalog, get_agent_config, planner_tool_hints
 from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
+from ..run_logging import AgentRunLogger
 from ..schemas import Plan
 from ..workflows import policies
 
@@ -25,6 +26,7 @@ def plan_from_message(
     *,
     model: str | None = None,
     client: LLMClient | None = None,
+    logger: AgentRunLogger | None = None,
 ) -> Plan:
     """Return a plan for the provided user message using the LiteLLM proxy."""
 
@@ -42,17 +44,33 @@ def plan_from_message(
     planner_client = client or LLMClient(model_name=target_model)
     try:
         messages = _build_messages(normalized)
+        if logger is not None:
+            logger.log_event(
+                "planner_request",
+                {
+                    "model": target_model,
+                    "messages": [msg.as_dict() for msg in messages],
+                },
+            )
         if isinstance(planner_client, LLMClient):
             response = planner_client.chat(messages, agent_config=agent_config)
         else:  # test doubles may not accept agent_config keyword
             response = planner_client.chat(messages)
+        if logger is not None:
+            logger.log_event(
+                "planner_response_raw",
+                {"response": response},
+            )
     finally:
         if owns_client:
             planner_client.close()
 
     payload = _parse_plan_response(response, normalized)
     normalized_payload = _apply_defaults(payload, normalized)
-    return Plan.model_validate(normalized_payload)
+    plan = Plan.model_validate(normalized_payload)
+    if logger is not None:
+        logger.log_plan(plan, raw_response=response)
+    return plan
 
 
 def _build_messages(user_message: str) -> Iterable[LLMMessage]:

@@ -75,3 +75,41 @@ CREATE TABLE IF NOT EXISTS kb.chunk_embeddings (
     PRIMARY KEY (chunk_id, space_id)
 );
 
+CREATE SCHEMA IF NOT EXISTS agent;
+
+CREATE TABLE IF NOT EXISTS agent.runs (
+    id UUID PRIMARY KEY,
+    user_message TEXT NOT NULL,
+    user_metadata JSONB DEFAULT '{}'::jsonb,
+    planner_model TEXT,
+    responder_model TEXT,
+    audit_model TEXT,
+    plan JSONB,
+    response JSONB,
+    audit_report JSONB,
+    evidence JSONB,
+    success BOOLEAN,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    duration_ms INTEGER,
+    chat_ingest_item_id UUID,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_started_at ON agent.runs (started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_success ON agent.runs (success);
+
+CREATE TABLE IF NOT EXISTS agent.events (
+    id BIGSERIAL PRIMARY KEY,
+    run_id UUID REFERENCES agent.runs(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    task_id TEXT,
+    tool TEXT,
+    status TEXT,
+    payload JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent.events (run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_events_type ON agent.events (event_type);
