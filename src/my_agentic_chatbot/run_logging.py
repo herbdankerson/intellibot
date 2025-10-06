@@ -68,7 +68,7 @@ class AgentRunLogger:
             "planner_model": planner_model,
             "responder_model": responder_model,
             "audit_model": audit_model,
-            "user_metadata": user_metadata or {},
+            "user_metadata": json.dumps(user_metadata or {}),
         }
         self._metadata = payload
         self._execute(

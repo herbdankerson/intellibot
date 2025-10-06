@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
+
+from sqlalchemy import text
 
 from etl.tasks.intake_models import (
     Chunk,
@@ -22,6 +25,7 @@ from etl.tasks.model_clients import (
 from etl.tasks.intake_tasks import persist_results
 
 from .schemas import AgentResponse, EvidencePack, Plan
+from .storage.db import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +65,49 @@ def persist_chat_transcript(
         )
         item = item.with_status("completed")
         item.domain = domain
+
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO kb.ingest_items (
+                        id,
+                        job_id,
+                        source_type,
+                        source_uri,
+                        display_name,
+                        status,
+                        metadata,
+                        created_at,
+                        updated_at
+                    ) VALUES (
+                        :id,
+                        :job_id,
+                        :source_type,
+                        :source_uri,
+                        :display_name,
+                        :status,
+                        CAST(:metadata AS JSONB),
+                        NOW(),
+                        NOW()
+                    )
+                    ON CONFLICT (id) DO UPDATE
+                    SET status = EXCLUDED.status,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = NOW()
+                    """
+                ),
+                {
+                    "id": str(item.id),
+                    "job_id": str(item.job_id) if item.job_id else str(uuid4()),
+                    "source_type": item.source_type,
+                    "source_uri": item.source_uri,
+                    "display_name": item.display_name,
+                    "status": item.status,
+                    "metadata": json.dumps(metadata),
+                },
+            )
 
         conversation_text = _conversation_text(user_message, response.answer)
         document = NormalizedDocument(
