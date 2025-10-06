@@ -1,8 +1,8 @@
 """Configuration helpers for the chatbot service."""
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +10,11 @@ import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .constants import (
+    ACCEPTANCE_CONFIDENCE_THRESHOLD,
+    ACCEPTANCE_STRICT_MIN_SOURCES,
+    MAX_WORKFLOW_ITERATIONS,
+)
 
 @dataclass(frozen=True)
 class MCPServerConfig:
@@ -111,6 +116,17 @@ class Settings(BaseSettings):
     tool_timeout_overrides: Dict[str, int] = Field(
         default_factory=dict, alias="TOOL_TIMEOUT_OVERRIDES"
     )
+    af_max_iterations: int = Field(
+        default=MAX_WORKFLOW_ITERATIONS, alias="AF_MAX_ITERATIONS"
+    )
+    acceptance_confidence_threshold: float = Field(
+        default=ACCEPTANCE_CONFIDENCE_THRESHOLD,
+        alias="ACCEPTANCE_CONFIDENCE_THRESHOLD",
+    )
+    acceptance_min_sources: int = Field(
+        default=ACCEPTANCE_STRICT_MIN_SOURCES,
+        alias="ACCEPTANCE_MIN_SOURCES",
+    )
 
     def lite_llm_headers(self) -> Dict[str, str]:
         """Return default headers for LiteLLM proxy calls."""
@@ -163,6 +179,9 @@ class Settings(BaseSettings):
             "prefect_api_url": self.prefect_api_url,
             "prefect_server_ephemeral_enabled": self.prefect_server_ephemeral_enabled,
             "prefect_server_ephemeral_startup_timeout_seconds": self.prefect_server_ephemeral_startup_timeout_seconds,
+            "af_max_iterations": self.af_max_iterations,
+            "acceptance_confidence_threshold": self.acceptance_confidence_threshold,
+            "acceptance_min_sources": self.acceptance_min_sources,
         }
 
 
