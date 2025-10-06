@@ -1,0 +1,5 @@
+tunnel: openwebui
+ingress:
+  - hostname: openwebui.dankersons.com
+    service: http://openwebui:8080
+  - service: http_status:404

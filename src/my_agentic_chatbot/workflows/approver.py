@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..schemas import Plan, PlanTask
+from ..schemas import EvidencePack, Plan, PlanTask
 
 if TYPE_CHECKING:
     from ..schemas import AgentResponse
@@ -29,6 +29,9 @@ class Approver:
         return ApprovalResult(approved=True)
 
     def approve_response(self, response: "AgentResponse") -> ApprovalResult:  # pragma: no cover
+        return ApprovalResult(approved=True)
+
+    def approve_evidence(self, pack: EvidencePack) -> ApprovalResult:  # pragma: no cover
         return ApprovalResult(approved=True)
 
 

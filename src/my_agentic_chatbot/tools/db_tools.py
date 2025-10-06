@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List
 
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
-from ..schemas import EvidenceItem
+from ..schemas import EvidenceItem, PlanTask
 from ..util.text import build_snippet, deduplicate_items
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +36,13 @@ class DatabaseTool:
         else:
             self.tool_name = self.tool_name or "db_search"
 
-    def search(self, query: str, *, limit: int | None = None) -> List[EvidenceItem]:
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int | None = None,
+        timeout_seconds: int | None = None,
+    ) -> List[EvidenceItem]:
         """Return evidence items for the provided natural language query."""
 
         if not query.strip():
@@ -45,15 +51,26 @@ class DatabaseTool:
         if not self.client or not self.tool_name:
             raise RuntimeError("Database tool is not configured with an MCP client")
 
-        response = self.client.call_tool_sync(
-            self.tool_name,
-            {"query": query, "limit": limit},
-        )
+        arguments: Dict[str, Any] = {"query": query, "limit": limit}
+        if timeout_seconds is not None:
+            arguments["timeout_seconds"] = timeout_seconds
+        response = self.client.call_tool_sync(self.tool_name, arguments)
         rows = self._extract_rows(response)
         items = [self._row_to_evidence(index, row) for index, row in enumerate(rows[:limit])]
         if not items and response.content:
             items = self._fallback_from_content(response.content, limit)
         return deduplicate_items(items)[:limit]
+
+    def execute(self, task: PlanTask, *, limit: int | None = None) -> List[EvidenceItem]:
+        """Run the MCP-backed search based on the plan task inputs."""
+
+        query = str(task.inputs.get("query") or task.description)
+        requested_limit = task.inputs.get("limit") if isinstance(task.inputs, dict) else None
+        final_limit = limit or self.max_results
+        if isinstance(requested_limit, int) and requested_limit > 0:
+            final_limit = min(final_limit, requested_limit)
+        timeout = task.timeout_seconds
+        return self.search(query, limit=final_limit, timeout_seconds=timeout)
 
     def _default_tool(self, config: MCPServerConfig) -> str:
         if config.tools:

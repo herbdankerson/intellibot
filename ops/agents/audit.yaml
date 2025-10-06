@@ -1,0 +1,8 @@
+name: audit
+model: cheap-worker
+include_thoughts: false
+generation:
+  response_mime_type: text/plain
+  max_output_tokens: 4096
+  thinking_mode: disabled
+  thinking_budget_tokens: 1024

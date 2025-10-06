@@ -3,6 +3,10 @@
 import json
 
 from src.my_agentic_chatbot.planner.main_planner import plan_from_message
+from src.my_agentic_chatbot.constants import (
+    DEFAULT_CUSTOM_AGENT_BUDGET_TOKENS,
+    DEFAULT_CUSTOM_AGENT_TIMEOUT_SECONDS,
+)
 from src.my_agentic_chatbot.workflows import policies
 
 
@@ -39,6 +43,8 @@ def test_plan_contains_budgeted_db_task() -> None:
     assert first_task.tool == "db_search"
     assert first_task.budget_tokens == policies.DEFAULT_DB_BUDGET_TOKENS
     assert first_task.timeout_seconds == policies.DEFAULT_DB_TIMEOUT_SECONDS
+    assert first_task.inputs == {}
+    assert first_task.depends_on == []
 
 
 def test_plan_optionally_includes_graph_task() -> None:
@@ -75,3 +81,41 @@ def test_plan_raises_on_empty_message() -> None:
         assert "non-empty" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("Planner should reject empty prompts")
+
+
+def test_plan_defaults_custom_agent_budget() -> None:
+    payload = {
+        "goals": ["Delegate to custom agent"],
+        "tasks": [
+            {
+                "id": "agent-1",
+                "description": "Run custom reasoning",
+                "tool": "agent-cheap-worker",
+            }
+        ],
+    }
+    plan = plan_from_message(
+        "Run the custom agent for extra reasoning",
+        client=StubPlannerClient(payload),
+    )
+    assert plan.tasks[0].budget_tokens == DEFAULT_CUSTOM_AGENT_BUDGET_TOKENS
+    assert plan.tasks[0].timeout_seconds == DEFAULT_CUSTOM_AGENT_TIMEOUT_SECONDS
+    assert plan.tasks[0].requires_approval is False
+
+
+def test_plan_normalizes_numeric_identifiers() -> None:
+    payload = {
+        "goals": ["Normalize"],
+        "tasks": [
+            {
+                "id": 1,
+                "description": "Database lookup",
+                "tool": "db_search",
+                "depends_on": [2],
+                "inputs": {"limit": "3"},
+            }
+        ],
+    }
+    plan = plan_from_message("Normalize task identifiers", client=StubPlannerClient(payload))
+    assert plan.tasks[0].id == "1"
+    assert plan.tasks[0].depends_on == ["2"]

@@ -28,7 +28,8 @@ contract:
    ```
 
    This provisions ParadeDB, LiteLLM, Prefect (`http://localhost:4200`), OpenWebUI
-   (`http://localhost:3000`), and the Postgres MCP server (`http://localhost:4050`).
+   (`http://localhost:3000`), the Postgres MCP server (`http://localhost:4050`), and
+   a SearXNG metasearch instance (`http://localhost:8085`).
 
 3. **Apply the schema and seed content**:
 
@@ -43,6 +44,24 @@ contract:
    ```bash
    uvicorn src.my_agentic_chatbot.main:app --host 0.0.0.0 --port 8000
    ```
+
+### SearXNG search service
+
+SearXNG boots with the rest of the stack and is also runnable on its own:
+
+```bash
+docker compose up -d searxng searxng-redis
+```
+
+The instance listens on `http://localhost:8085`. You can issue a quick smoke
+test with:
+
+```bash
+curl -H 'User-Agent: Mozilla/5.0' 'http://localhost:8085/search?q=test'
+```
+
+Set `SEARXNG_SECRET` (and optionally `SEARXNG_BASE_URL`) in `.env` before
+exposing the service beyond localhost.
 
 ## Development
 

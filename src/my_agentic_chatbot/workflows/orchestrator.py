@@ -3,37 +3,73 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
-from typing import Iterable, List, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from prefect import flow, get_run_logger, task
-from prefect.settings import (
-    PREFECT_API_URL,
-    PREFECT_SERVER_EPHEMERAL_ENABLED,
-    PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS,
-    temporary_settings,
-)
+try:  # pragma: no cover - exercised via integration tests when Prefect is available
+    from prefect import flow, get_run_logger, task
+    from prefect.settings import (
+        PREFECT_API_URL,
+        PREFECT_SERVER_EPHEMERAL_ENABLED,
+        PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS,
+        temporary_settings,
+    )
+except Exception:  # pragma: no cover - fallback for unit tests/local dev
+    def flow(*_args, **_kwargs):  # type: ignore[misc]
+        def decorator(fn):
+            return fn
 
+        return decorator
+
+    def task(*_args, **_kwargs):  # type: ignore[misc]
+        def decorator(fn):
+            return fn
+
+        return decorator
+
+    def get_run_logger():
+        return logging.getLogger("prefect-fallback")
+
+    def temporary_settings(_overrides):  # type: ignore[override]
+        return nullcontext()
+
+    PREFECT_API_URL = "PREFECT_API_URL"
+    PREFECT_SERVER_EPHEMERAL_ENABLED = "PREFECT_SERVER_EPHEMERAL_ENABLED"
+    PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS = (
+        "PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS"
+    )
+
+from ..agents import get_agent_config, iter_custom_agent_descriptors
+from ..agents.runtime import CustomAgentRunner
 from ..config import get_settings
 from ..response.responder import Responder
 from ..schemas import (
     AgentResponse,
+    AuditReport,
     EvidenceItem,
     EvidencePack,
     ExecutionEvent,
     ExecutionReport,
     ExecutionResult,
     Plan,
-    PlanTask,
     TaskStatus,
 )
 from ..tools.db_tools import DatabaseTool
 from ..tools.graph_tools import GraphTool
 from ..tools.web_tools import WebTool
+from ..util.text import (
+    clip_to_token_budget,
+    deduplicate_items,
+    reciprocal_rank_fuse,
+    summarize_evidence,
+)
 from ..util.tracing import generate_run_id
 from . import policies
 from .approver import ApprovalResult, Approver, AutoApprover
+from .audit import AuditAgent
+from .workflow_designer import WorkflowDesigner, WorkflowNode, WorkflowNodeType
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +81,7 @@ class ToolSuite:
     db: DatabaseTool
     graph: GraphTool
     web: WebTool
+    agents: Dict[str, CustomAgentRunner] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,6 +91,8 @@ class FlowRuntime:
     tools: ToolSuite
     responder: Responder
     approver: Approver
+    designer: WorkflowDesigner
+    audit_agent: Optional[AuditAgent] = None
 
 
 @dataclass
@@ -62,16 +101,29 @@ class FlowOutput:
 
     response: AgentResponse | None
     result: ExecutionResult
+    audit_report: AuditReport | None = None
 
 
 _RUNTIME: FlowRuntime | None = None
 
 
 @contextmanager
-def workflow_runtime(tools: ToolSuite, responder: Responder, approver: Approver):
+def workflow_runtime(
+    tools: ToolSuite,
+    responder: Responder,
+    approver: Approver,
+    designer: WorkflowDesigner,
+    audit_agent: Optional[AuditAgent],
+):
     global _RUNTIME
     previous = _RUNTIME
-    _RUNTIME = FlowRuntime(tools=tools, responder=responder, approver=approver)
+    _RUNTIME = FlowRuntime(
+        tools=tools,
+        responder=responder,
+        approver=approver,
+        designer=designer,
+        audit_agent=audit_agent,
+    )
     try:
         yield
     finally:
@@ -91,19 +143,19 @@ def _approve_plan(plan: Plan) -> ApprovalResult:
 
 
 @task(name="approve-task", persist_result=False)
-def _approve_task(plan_task: PlanTask) -> ApprovalResult:
+def _approve_task(node: WorkflowNode) -> ApprovalResult:
     runtime = _get_runtime()
-    return runtime.approver.approve_task(plan_task)
+    return runtime.approver.approve_task(node.task)
 
 
 @task(name="execute-task", persist_result=False)
-def _execute_task(plan_task: PlanTask) -> List[EvidenceItem]:
+def _execute_task(node: WorkflowNode) -> List[EvidenceItem]:
     runtime = _get_runtime()
-    return run_tool(runtime.tools, plan_task)
+    return run_tool(runtime.tools, node)
 
 
 @task(name="assemble-evidence", persist_result=False)
-def _assemble_evidence_task(items: List[EvidenceItem]) -> EvidencePack:
+def _assemble_evidence_task(items: Sequence[EvidenceItem]) -> EvidencePack:
     return assemble_evidence(items)
 
 
@@ -113,10 +165,34 @@ def _generate_response_task(message: str, pack: EvidencePack) -> AgentResponse:
     return runtime.responder.respond(message, pack)
 
 
+@task(name="approve-evidence", persist_result=False)
+def _approve_evidence_task(pack: EvidencePack) -> ApprovalResult:
+    runtime = _get_runtime()
+    return runtime.approver.approve_evidence(pack)
+
+
 @task(name="approve-response", persist_result=False)
 def _approve_response_task(response: AgentResponse) -> ApprovalResult:
     runtime = _get_runtime()
     return runtime.approver.approve_response(response)
+
+
+@task(name="audit-response", persist_result=False)
+def _audit_response_task(
+    message: str,
+    plan: Plan,
+    pack: EvidencePack,
+    response: AgentResponse | None,
+) -> AuditReport | None:
+    runtime = _get_runtime()
+    if runtime.audit_agent is None or response is None:
+        return None
+    return runtime.audit_agent.evaluate(
+        question=message,
+        plan=plan,
+        evidence=pack,
+        response=response,
+    )
 
 
 def _resolve_task_result(value):
@@ -143,58 +219,200 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             result=ExecutionResult(evidence=empty_pack, report=report),
         )
 
+    try:
+        workflow_graph = runtime.designer.build_graph(plan)
+    except ValueError as exc:
+        logger.exception("Workflow designer failed to build graph")
+        report.successful = False
+        report.notes.append(str(exc))
+        report.record(
+            ExecutionEvent(
+                task_id="workflow",
+                status=TaskStatus.FAILED,
+                message="Workflow designer failed",
+            )
+        )
+        empty_pack = EvidencePack()
+        return FlowOutput(
+            response=None,
+            result=ExecutionResult(evidence=empty_pack, report=report),
+        )
+
     collected: List[EvidenceItem] = []
-    for plan_task in plan.tasks:
-        if plan_task.requires_approval:
-            decision = _resolve_task_result(_approve_task(plan_task))
+    status_map: Dict[str, TaskStatus] = {}
+    completed: Set[str] = set()
+    failed: Set[str] = set()
+    skipped: Set[str] = set()
+
+    for node in workflow_graph.ordered():
+        dependency_messages: List[str] = []
+        for dependency in node.dependencies:
+            dep_status = status_map.get(dependency)
+            if dep_status is None:
+                dependency_messages.append(f"{dependency} pending")
+                continue
+            allowed_statuses = node.dependency_statuses(dependency)
+            if dep_status not in allowed_statuses:
+                allowed_labels = ", ".join(sorted(status.value for status in allowed_statuses))
+                dependency_messages.append(
+                    f"{dependency} status {dep_status.value} not in [{allowed_labels}]"
+                )
+        if dependency_messages:
+            note = "; ".join(dependency_messages)
+            report.record(
+                ExecutionEvent(
+                    task_id=node.id,
+                    status=TaskStatus.SKIPPED,
+                    message=note,
+                )
+            )
+            skipped.add(node.id)
+            status_map[node.id] = TaskStatus.SKIPPED
+            continue
+
+        if not node.should_run(status_map):
+            report.record(
+                ExecutionEvent(
+                    task_id=node.id,
+                    status=TaskStatus.SKIPPED,
+                    message="Branch conditions not satisfied",
+                )
+            )
+            skipped.add(node.id)
+            status_map[node.id] = TaskStatus.SKIPPED
+            continue
+
+        policy_decision = policies.enforce_task_limits(node.task)
+        if not policy_decision.allowed:
+            reason = policy_decision.reason or "policy rejection"
+            report.record(
+                ExecutionEvent(
+                    task_id=node.id,
+                    status=TaskStatus.FAILED,
+                    message=f"Policy rejected task: {reason}",
+                )
+            )
+            report.notes.append(f"Policy rejected {node.id}: {reason}")
+            failed.add(node.id)
+            status_map[node.id] = TaskStatus.FAILED
+            continue
+
+        if node.task.requires_approval:
+            decision = _resolve_task_result(_approve_task(node))
             if not decision.approved:
                 note = decision.reason or "Task rejected"
                 report.record(
                     ExecutionEvent(
-                        task_id=plan_task.id,
+                        task_id=node.id,
                         status=TaskStatus.FAILED,
                         message=f"Task rejected: {note}",
                     )
                 )
+                failed.add(node.id)
+                status_map[node.id] = TaskStatus.FAILED
                 continue
+
         report.record(
             ExecutionEvent(
-                task_id=plan_task.id,
+                task_id=node.id,
                 status=TaskStatus.RUNNING,
-                message=f"tool={plan_task.tool}",
+                message=f"tool={node.task.tool}, attempts={node.max_attempts}",
             )
         )
         try:
-            outputs = _resolve_task_result(_execute_task(plan_task))
+            outputs = _execute_with_retries(node)
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception(
                 "Tool execution failed",
-                extra={"task_id": plan_task.id, "tool": plan_task.tool},
+                extra={"task_id": node.id, "tool": node.task.tool},
             )
             report.record(
                 ExecutionEvent(
-                    task_id=plan_task.id,
+                    task_id=node.id,
                     status=TaskStatus.FAILED,
                     message=str(exc),
                 )
             )
+            failed.add(node.id)
+            status_map[node.id] = TaskStatus.FAILED
             continue
         collected.extend(outputs)
+        completed.add(node.id)
+        status_map[node.id] = TaskStatus.COMPLETED
         report.record(
             ExecutionEvent(
-                task_id=plan_task.id,
+                task_id=node.id,
                 status=TaskStatus.COMPLETED,
                 message=f"items={len(outputs)}",
             )
         )
 
+    if skipped:
+        report.notes.append("Skipped tasks: " + ", ".join(sorted(skipped)))
+
     evidence_pack = _resolve_task_result(_assemble_evidence_task(collected))
-    result = ExecutionResult(evidence=evidence_pack, report=report)
+    evidence_decision = _resolve_task_result(_approve_evidence_task(evidence_pack))
+    if not evidence_decision.approved:
+        reason = evidence_decision.reason or "Evidence pack rejected"
+        report.record(
+            ExecutionEvent(
+                task_id="evidence_gate",
+                status=TaskStatus.FAILED,
+                message=reason,
+            )
+        )
+        report.notes.append(f"Evidence rejected: {reason}")
+        report.successful = False
+        return FlowOutput(
+            response=None,
+            result=ExecutionResult(evidence=evidence_pack, report=report),
+        )
+
+    if failed:
+        report.successful = False
+    audit_report: AuditReport | None = None
 
     if not deliver_response:
+        result = ExecutionResult(evidence=evidence_pack, report=report, audit_report=None)
         return FlowOutput(response=None, result=result)
 
     response = _resolve_task_result(_generate_response_task(message, evidence_pack))
+    audit_report = _resolve_task_result(
+        _audit_response_task(message, plan, evidence_pack, response)
+    )
+    if audit_report and not audit_report.passed:
+        summary = audit_report.summary or "Audit checks failed"
+        report.record(
+            ExecutionEvent(
+                task_id="audit_gate",
+                status=TaskStatus.FAILED,
+                message=summary,
+            )
+        )
+        report.notes.append(summary)
+        report.successful = False
+        blocking_finding = next(
+            (
+                finding
+                for finding in audit_report.findings
+                if finding.severity == "error"
+            ),
+            None,
+        )
+        message_reason = blocking_finding.message if blocking_finding else summary
+        fallback = AgentResponse(
+            answer="Audit checks flagged issues requiring human review.",
+            citations=response.citations if response else [],
+            confidence=0.0,
+            unresolved_questions=[message_reason],
+        )
+        result = ExecutionResult(
+            evidence=evidence_pack,
+            report=report,
+            audit_report=audit_report,
+        )
+        return FlowOutput(response=fallback, result=result, audit_report=audit_report)
+
     approval = _resolve_task_result(_approve_response_task(response))
     if not approval.approved:
         reason = approval.reason or "Response rejected by approver."
@@ -214,7 +432,12 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             confidence=0.0,
             unresolved_questions=[reason],
         )
-        return FlowOutput(response=fallback, result=result)
+        result = ExecutionResult(
+            evidence=evidence_pack,
+            report=report,
+            audit_report=audit_report,
+        )
+        return FlowOutput(response=fallback, result=result, audit_report=audit_report)
 
     report.record(
         ExecutionEvent(
@@ -224,47 +447,86 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         )
     )
     report.notes.append("Response approved by approver.")
-    return FlowOutput(response=response, result=result)
+    result = ExecutionResult(
+        evidence=evidence_pack,
+        report=report,
+        audit_report=audit_report,
+    )
+    return FlowOutput(response=response, result=result, audit_report=audit_report)
 
 
-def run_tool(tool_suite: ToolSuite, plan_task: PlanTask) -> List[EvidenceItem]:
-    if plan_task.tool == "db_search":
-        return tool_suite.db.search(
-            plan_task.description, limit=policies.MAX_EVIDENCE_ITEMS
-        )
-    if plan_task.tool == "graph_search":
-        return tool_suite.graph.search(plan_task.description)
-    if plan_task.tool == "web_search":
-        return tool_suite.web.search(plan_task.description)
-    LOGGER.warning("Unsupported tool requested", extra={"tool": plan_task.tool})
+def run_tool(tool_suite: ToolSuite, node: WorkflowNode) -> List[EvidenceItem]:
+    task = node.task
+    if node.node_type == WorkflowNodeType.DB_QUERY:
+        return tool_suite.db.execute(task, limit=policies.MAX_EVIDENCE_ITEMS)
+    if node.node_type == WorkflowNodeType.GRAPH_QUERY:
+        return tool_suite.graph.execute(task)
+    if node.node_type == WorkflowNodeType.WEB_FETCH:
+        return tool_suite.web.execute(task, limit=policies.MAX_WEB_RESULTS)
+    if node.node_type == WorkflowNodeType.CUSTOM_AGENT:
+        runner = tool_suite.agents.get(task.tool)
+        if runner is None:
+            LOGGER.warning(
+                "Custom agent missing runner",
+                extra={"tool": task.tool, "task_id": node.id},
+            )
+            return []
+        return runner.execute(task)
+    runner = tool_suite.agents.get(task.tool)
+    if runner is not None:
+        return runner.execute(task)
+    LOGGER.warning("Unsupported workflow node", extra={"node": node.node_type.value})
+    return []
+
+
+def _execute_with_retries(node: WorkflowNode) -> List[EvidenceItem]:
+    """Execute a workflow node with retry semantics."""
+
+    attempts = max(1, node.max_attempts)
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _resolve_task_result(_execute_task(node))
+        except Exception as exc:  # pragma: no cover - defensive guard
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            LOGGER.warning(
+                "Retrying task after failure",
+                extra={
+                    "task_id": node.id,
+                    "tool": node.task.tool,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                },
+            )
+            if node.retry_delay_seconds > 0:
+                time.sleep(node.retry_delay_seconds)
+    if last_exc is not None:
+        raise last_exc
     return []
 
 
 def assemble_evidence(items: Iterable[EvidenceItem]) -> EvidencePack:
-    limited = policies.clamp_evidence(items)
-    pack = EvidencePack(items=list(limited), summary=summarize_items(limited))
+    deduped = deduplicate_items(items)
+    fused = reciprocal_rank_fuse(deduped)
+    limited = policies.clamp_evidence(fused)
+    ordered_items = list(limited)
+    summary = summarize_evidence(ordered_items)
+    pack = EvidencePack(items=ordered_items, summary=summary)
     if policies.within_token_budget(pack):
         return pack
-    truncated_items = list(pack.items)
-    truncated = False
-    while truncated_items and (
-        sum(item.token_estimate() for item in truncated_items)
-        > policies.EVIDENCE_TOKEN_BUDGET
-    ):
-        truncated = True
-        truncated_items.pop()
+    clipped_items, truncated = clip_to_token_budget(
+        ordered_items, token_budget=policies.EVIDENCE_TOKEN_BUDGET
+    )
+    clipped_summary = summarize_evidence(clipped_items)
+    if truncated and clipped_summary:
+        clipped_summary = f"{clipped_summary}\n(truncated for budget)"
     return EvidencePack(
-        items=truncated_items,
-        summary=summarize_items(truncated_items),
+        items=clipped_items,
+        summary=clipped_summary,
         truncated=truncated,
     )
-
-
-def summarize_items(items: Iterable[EvidenceItem]) -> str:
-    snippets = [item.content for item in items]
-    if not snippets:
-        return ""
-    return "\n".join(snippets[:2])
 
 
 class WorkflowOrchestrator:
@@ -277,14 +539,46 @@ class WorkflowOrchestrator:
         web_tool: WebTool | None = None,
         responder: Responder | None = None,
         approver: Approver | None = None,
+        designer: WorkflowDesigner | None = None,
+        custom_agents: Dict[str, CustomAgentRunner] | None = None,
+        audit_agent: AuditAgent | None = None,
     ) -> None:
         self.tools = ToolSuite(
             db=db_tool or DatabaseTool(),
             graph=graph_tool or GraphTool(),
             web=web_tool or WebTool(),
+            agents=custom_agents or self._build_custom_agents(),
         )
         self.responder = responder or Responder()
         self.approver = approver or AutoApprover()
+        self.designer = designer or WorkflowDesigner()
+        if audit_agent is None:
+            try:
+                audit_agent = AuditAgent()
+            except FileNotFoundError:
+                LOGGER.warning("Audit agent configuration missing; disabling audit gate")
+                audit_agent = None
+        self.audit_agent = audit_agent
+
+    def _build_custom_agents(self) -> Dict[str, CustomAgentRunner]:
+        runners: Dict[str, CustomAgentRunner] = {}
+        for descriptor in iter_custom_agent_descriptors():
+            config_name = descriptor.agent_config_name
+            if not config_name:
+                continue
+            try:
+                agent_config = get_agent_config(config_name)
+            except FileNotFoundError:
+                LOGGER.warning(
+                    "Missing agent configuration for custom agent",
+                    extra={"agent": config_name, "tool": descriptor.tool},
+                )
+                continue
+            runners[descriptor.tool] = CustomAgentRunner(
+                descriptor=descriptor,
+                agent_config=agent_config,
+            )
+        return runners
 
     @property
     def db_tool(self) -> DatabaseTool:
@@ -307,7 +601,13 @@ class WorkflowOrchestrator:
             yield
 
     def execute_plan(self, plan: Plan, *, message: str | None = None) -> ExecutionResult:
-        with workflow_runtime(self.tools, self.responder, self.approver):
+        with workflow_runtime(
+            self.tools,
+            self.responder,
+            self.approver,
+            self.designer,
+            self.audit_agent,
+        ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(
                     message=message or "Plan execution",
@@ -317,7 +617,13 @@ class WorkflowOrchestrator:
         return output.result
 
     def run_pipeline(self, message: str, plan: Plan) -> Tuple[AgentResponse, ExecutionResult]:
-        with workflow_runtime(self.tools, self.responder, self.approver):
+        with workflow_runtime(
+            self.tools,
+            self.responder,
+            self.approver,
+            self.designer,
+            self.audit_agent,
+        ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(
                     message=message,

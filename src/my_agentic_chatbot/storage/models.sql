@@ -1,40 +1,77 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TABLE IF NOT EXISTS kb_documents (
-    id SERIAL PRIMARY KEY,
-    external_id TEXT UNIQUE,
-    title TEXT NOT NULL,
-    uri TEXT,
-    tsv tsvector,
+CREATE SCHEMA IF NOT EXISTS kb;
+
+CREATE TABLE IF NOT EXISTS kb.ingest_items (
+    id UUID PRIMARY KEY,
+    job_id UUID,
+    source_type TEXT NOT NULL,
+    source_uri TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    mime_type TEXT,
+    language TEXT,
+    domain TEXT,
+    domain_confidence NUMERIC,
+    status TEXT NOT NULL DEFAULT 'pending',
+    document_summary TEXT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    error_info JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_kb_ingest_items_status ON kb.ingest_items (status);
+CREATE INDEX IF NOT EXISTS idx_kb_ingest_items_domain ON kb.ingest_items (domain);
+
+CREATE TABLE IF NOT EXISTS kb.documents (
+    id UUID PRIMARY KEY,
+    ingest_item_id UUID REFERENCES kb.ingest_items(id) ON DELETE CASCADE,
+    title TEXT,
+    text_full TEXT,
+    tsv TSVECTOR,
+    metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE TABLE IF NOT EXISTS kb_chunks (
-    id SERIAL PRIMARY KEY,
-    document_id INTEGER NOT NULL REFERENCES kb_documents(id) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL,
-    heading TEXT,
-    content TEXT NOT NULL,
-    tsv tsvector,
-    UNIQUE (document_id, ordinal)
+CREATE INDEX IF NOT EXISTS idx_kb_documents_ingest_item ON kb.documents (ingest_item_id);
+CREATE INDEX IF NOT EXISTS idx_kb_documents_tsv ON kb.documents USING GIN (tsv);
+
+CREATE TABLE IF NOT EXISTS kb.chunks (
+    id UUID PRIMARY KEY,
+    ingest_item_id UUID REFERENCES kb.ingest_items(id) ON DELETE CASCADE,
+    document_id UUID REFERENCES kb.documents(id) ON DELETE SET NULL,
+    chunk_index INTEGER NOT NULL,
+    heading_path TEXT[] DEFAULT ARRAY[]::TEXT[],
+    kind TEXT,
+    text TEXT NOT NULL,
+    summary TEXT,
+    token_count INTEGER,
+    overlap_tokens INTEGER,
+    ner_entities JSONB DEFAULT '[]'::jsonb,
+    tsv TSVECTOR,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (ingest_item_id, chunk_index)
 );
 
-CREATE TABLE IF NOT EXISTS kb_embedding_spaces (
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_document ON kb.chunks (document_id);
+CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb.chunks USING GIN (tsv);
+
+CREATE TABLE IF NOT EXISTS kb.embedding_spaces (
     id SERIAL PRIMARY KEY,
     name TEXT UNIQUE NOT NULL,
     model TEXT NOT NULL,
-    is_current BOOLEAN DEFAULT TRUE
+    provider TEXT NOT NULL,
+    dims INTEGER NOT NULL,
+    distance_metric TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS kb_embeddings (
-    id SERIAL PRIMARY KEY,
-    chunk_id INTEGER REFERENCES kb_chunks(id) ON DELETE CASCADE,
-    document_id INTEGER REFERENCES kb_documents(id) ON DELETE CASCADE,
-    space_id INTEGER NOT NULL REFERENCES kb_embedding_spaces(id),
-    level TEXT NOT NULL CHECK (level IN ('document', 'chunk')),
-    embedding VECTOR(1536),
-    created_at TIMESTAMPTZ DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS kb.chunk_embeddings (
+    chunk_id UUID REFERENCES kb.chunks(id) ON DELETE CASCADE,
+    space_id INTEGER REFERENCES kb.embedding_spaces(id) ON DELETE CASCADE,
+    embedding VECTOR,
+    score_meta JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (chunk_id, space_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_kb_documents_tsv ON kb_documents USING GIN (tsv);
-CREATE INDEX IF NOT EXISTS idx_kb_chunks_tsv ON kb_chunks USING GIN (tsv);

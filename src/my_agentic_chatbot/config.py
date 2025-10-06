@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", populate_by_name=True
+        env_file=".env",
+        env_file_encoding="utf-8",
+        populate_by_name=True,
+        extra="allow",
     )
 
     google_api_key: Optional[str] = Field(default=None, alias="GOOGLE_API_KEY")
@@ -80,6 +83,19 @@ class Settings(BaseSettings):
     litellm_timeout_seconds: float = Field(
         default=60.0, alias="LITELLM_TIMEOUT_SECONDS"
     )
+    docling_base_url: str = Field(default="http://localhost:8000", alias="DOCLING_BASE_URL")
+    docling_timeout_seconds: float = Field(
+        default=120.0, alias="DOCLING_TIMEOUT_SECONDS"
+    )
+    docling_poll_interval_seconds: float = Field(
+        default=5.0, alias="DOCLING_POLL_INTERVAL_SECONDS"
+    )
+    ingest_http_timeout_seconds: float = Field(
+        default=15.0, alias="INGEST_HTTP_TIMEOUT_SECONDS"
+    )
+    openwebui_database_url: Optional[str] = Field(
+        default=None, alias="OPENWEBUI_DATABASE_URL"
+    )
     mcp_servers_path: str = Field(default="ops/mcp/servers.yaml", alias="MCP_SERVERS_PATH")
     agents_config_dir: str = Field(default="ops/agents", alias="AGENTS_CONFIG_DIR")
     prefect_api_url: Optional[str] = Field(default=None, alias="PREFECT_API_URL")
@@ -88,6 +104,9 @@ class Settings(BaseSettings):
     )
     prefect_server_ephemeral_startup_timeout_seconds: int = Field(
         default=60, alias="PREFECT_SERVER_EPHEMERAL_STARTUP_TIMEOUT_SECONDS"
+    )
+    tool_timeout_overrides: Dict[str, int] = Field(
+        default_factory=dict, alias="TOOL_TIMEOUT_OVERRIDES"
     )
 
     def lite_llm_headers(self) -> Dict[str, str]:

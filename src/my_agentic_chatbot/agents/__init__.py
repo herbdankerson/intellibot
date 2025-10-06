@@ -1,20 +1,32 @@
-"""Agent configuration loader for planner/responder/workers."""
+"""Agent configuration loader and catalog helpers."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Literal, Optional
+from typing import Dict, Iterable, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 from ..config import get_settings
-
+from ..constants import (
+    CUSTOM_TASK_PREFIX,
+    DEFAULT_CUSTOM_AGENT_BUDGET_TOKENS,
+    DEFAULT_CUSTOM_AGENT_TIMEOUT_SECONDS,
+    DEFAULT_DB_BUDGET_TOKENS,
+    DEFAULT_DB_TIMEOUT_SECONDS,
+    DEFAULT_GRAPH_BUDGET_TOKENS,
+    DEFAULT_GRAPH_TIMEOUT_SECONDS,
+    DEFAULT_WEB_BUDGET_TOKENS,
+    DEFAULT_WEB_TIMEOUT_SECONDS,
+)
 
 THINKING_BUDGET_MIN = 128
 THINKING_BUDGET_MAX = 32768
 MAX_OUTPUT_TOKENS = 65536
+RESERVED_AGENT_NAMES = {"planner", "responder", "audit"}
 
 
 class AgentGenerationConfig(BaseModel):
@@ -88,6 +100,28 @@ class AgentConfig(BaseModel):
         )
 
 
+@dataclass(frozen=True)
+class AgentDescriptor:
+    """Metadata about an executable agent/tool that planners may target."""
+
+    tool: str
+    description: str
+    runtime: Literal["mcp", "llm"]
+    default_budget_tokens: int
+    default_timeout_seconds: int
+    requires_approval: bool = False
+    agent_config_name: str | None = None
+
+    def planner_hint(self) -> str:
+        """Return a formatted hint describing this agent for planner prompts."""
+
+        approval = " (requires approval)" if self.requires_approval else ""
+        return (
+            f"{self.tool}: {self.description} — budget {self.default_budget_tokens} tokens, "
+            f"timeout {self.default_timeout_seconds}s{approval}"
+        )
+
+
 @lru_cache(maxsize=32)
 def _load_agent_config(path: Path) -> AgentConfig:
     raw = yaml.safe_load(path.read_text()) or {}
@@ -109,4 +143,90 @@ def get_agent_config(agent_name: str) -> AgentConfig:
     return _load_agent_config(path)
 
 
-__all__ = ["AgentConfig", "AgentGenerationConfig", "get_agent_config"]
+@lru_cache(maxsize=4)
+def list_agent_configs() -> Dict[str, AgentConfig]:
+    """Return all agent configurations keyed by their logical name."""
+
+    settings = get_settings()
+    agent_dir = settings.resolve_path(settings.agents_config_dir)
+    if not agent_dir.exists():
+        return {}
+
+    configs: Dict[str, AgentConfig] = {}
+    for path in agent_dir.glob("*.yaml"):
+        if path.name == "schema.yaml":
+            continue
+        config = _load_agent_config(path)
+        configs[config.name] = config
+    return configs
+
+
+@lru_cache(maxsize=1)
+def get_agent_catalog() -> Dict[str, AgentDescriptor]:
+    """Build a map of tool identifiers to planner-visible agent descriptors."""
+
+    catalog: Dict[str, AgentDescriptor] = {
+        "db_search": AgentDescriptor(
+            tool="db_search",
+            description="Hybrid Postgres search (BM25 + pgvector snippets)",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
+        ),
+        "graph_search": AgentDescriptor(
+            tool="graph_search",
+            description="Neo4j graph explorer for multi-hop relationship questions",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_GRAPH_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_GRAPH_TIMEOUT_SECONDS,
+            requires_approval=True,
+        ),
+        "web_search": AgentDescriptor(
+            tool="web_search",
+            description="SearxNG metasearch returning compact web snippets",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_WEB_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_WEB_TIMEOUT_SECONDS,
+        ),
+    }
+
+    for name, config in list_agent_configs().items():
+        if name in RESERVED_AGENT_NAMES:
+            continue
+        tool_name = f"{CUSTOM_TASK_PREFIX}-{config.name}" if CUSTOM_TASK_PREFIX else config.name
+        catalog[tool_name] = AgentDescriptor(
+            tool=tool_name,
+            description=f"LLM agent '{config.name}' using model {config.model}",
+            runtime="llm",
+            default_budget_tokens=DEFAULT_CUSTOM_AGENT_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_CUSTOM_AGENT_TIMEOUT_SECONDS,
+            agent_config_name=config.name,
+        )
+
+    return catalog
+
+
+def planner_tool_hints() -> List[str]:
+    """Return formatted strings describing available tools for prompt inclusion."""
+
+    return [descriptor.planner_hint() for descriptor in get_agent_catalog().values()]
+
+
+def iter_custom_agent_descriptors() -> Iterable[AgentDescriptor]:
+    """Yield descriptors for LLM-based custom agents only."""
+
+    for descriptor in get_agent_catalog().values():
+        if descriptor.runtime == "llm" and descriptor.agent_config_name:
+            yield descriptor
+
+
+__all__ = [
+    "AgentConfig",
+    "AgentDescriptor",
+    "AgentGenerationConfig",
+    "get_agent_catalog",
+    "get_agent_config",
+    "iter_custom_agent_descriptors",
+    "list_agent_configs",
+    "planner_tool_hints",
+]

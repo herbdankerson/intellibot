@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
-from ..agents import get_agent_config
+from ..agents import get_agent_catalog, get_agent_config, planner_tool_hints
 from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..schemas import Plan
@@ -18,24 +18,6 @@ LOGGER = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 _PROMPT_CACHE: Dict[str, str] = {}
-
-_TOOL_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "db_search": {
-        "budget": policies.DEFAULT_DB_BUDGET_TOKENS,
-        "timeout": policies.DEFAULT_DB_TIMEOUT_SECONDS,
-        "prefix": "db",
-    },
-    "graph_search": {
-        "budget": policies.DEFAULT_GRAPH_BUDGET_TOKENS,
-        "timeout": policies.DEFAULT_GRAPH_TIMEOUT_SECONDS,
-        "prefix": "graph",
-    },
-    "web_search": {
-        "budget": policies.DEFAULT_WEB_BUDGET_TOKENS,
-        "timeout": policies.DEFAULT_WEB_TIMEOUT_SECONDS,
-        "prefix": "web",
-    },
-}
 
 
 def plan_from_message(
@@ -88,17 +70,19 @@ def _build_messages(user_message: str) -> Iterable[LLMMessage]:
         web_tokens=policies.DEFAULT_WEB_BUDGET_TOKENS,
         web_timeout=policies.DEFAULT_WEB_TIMEOUT_SECONDS,
     )
+    tool_hints = planner_tool_hints()
+    agent_guidance = "Available agents/tools:\n" + "\n".join(tool_hints) if tool_hints else ""
     schema_prompt = (
         "Respond with a JSON object containing keys: goals, assumptions, info_needed, tasks, "
         "stop_conditions, acceptance_criteria. The tasks array must contain objects with the "
         "fields id, description, tool, budget_tokens, timeout_seconds, requires_approval."
     )
     system_content = (
-        f"{system_prompt}\n\nRubrics:\n{rubric_prompt}\n\n{budget_guidance}\n{schema_prompt}"
+        f"{system_prompt}\n\nRubrics:\n{rubric_prompt}\n\n{budget_guidance}\n{agent_guidance}\n{schema_prompt}"
     )
     user_content = (
         f"User request: {user_message}\n"
-        "Ensure the plan is minimal and references tools available via MCP."
+        "Ensure the plan is minimal and references tools available via MCP or custom agents."
     )
     return [
         LLMMessage(role="system", content=system_content),
@@ -157,31 +141,67 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
     if not isinstance(tasks, list):
         raise ValueError("Planner tasks must be a list")
 
+    catalog = get_agent_catalog()
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
             raise ValueError("Planner tasks must be objects")
         tool = str(task.get("tool", "")).strip()
-        defaults = _TOOL_DEFAULTS.get(
-            tool,
-            {
-                "budget": policies.DEFAULT_DB_BUDGET_TOKENS,
-                "timeout": policies.DEFAULT_DB_TIMEOUT_SECONDS,
-                "prefix": tool or "task",
-            },
+        descriptor = catalog.get(tool)
+        task.setdefault(
+            "budget_tokens",
+            descriptor.default_budget_tokens if descriptor else policies.DEFAULT_DB_BUDGET_TOKENS,
         )
-        task.setdefault("budget_tokens", defaults["budget"])
-        task.setdefault("timeout_seconds", defaults["timeout"])
-        identifier = str(task.get("id", "")).strip()
-        if not identifier:
-            task["id"] = f"{defaults['prefix']}-{index + 1}"
-        if tool == "graph_search":
-            task.setdefault("requires_approval", True)
+        task.setdefault(
+            "timeout_seconds",
+            descriptor.default_timeout_seconds if descriptor else policies.DEFAULT_DB_TIMEOUT_SECONDS,
+        )
+        identifier_value = task.get("id", "")
+        if isinstance(identifier_value, (int, float)):
+            if isinstance(identifier_value, float) and identifier_value.is_integer():
+                identifier = str(int(identifier_value))
+            else:
+                identifier = str(identifier_value)
         else:
-            task.setdefault("requires_approval", False)
+            identifier = str(identifier_value).strip()
+        if not identifier:
+            identifier = f"{_default_prefix(tool)}-{index + 1}"
+        task["id"] = identifier
+        requires_approval = descriptor.requires_approval if descriptor else tool == "graph_search"
+        task.setdefault("requires_approval", requires_approval)
         description = str(task.get("description", "")).strip()
         if not description:
             task["description"] = f"Run {tool or 'a tool'} for: {goal}"
+        inputs = task.setdefault("inputs", {})
+        if isinstance(inputs, dict):
+            task["inputs"] = {str(key): value for key, value in inputs.items()}
+        else:
+            task["inputs"] = {}
+        dependencies = task.setdefault("depends_on", [])
+        if isinstance(dependencies, str):
+            task["depends_on"] = [dependencies]
+        elif isinstance(dependencies, list):
+            normalized_dependencies = []
+            for dep in dependencies:
+                dep_id = str(dep).strip()
+                if dep_id:
+                    normalized_dependencies.append(dep_id)
+            task["depends_on"] = normalized_dependencies
+        else:
+            task["depends_on"] = []
     return payload
+
+
+def _default_prefix(tool: str) -> str:
+    normalized = tool or "task"
+    if normalized.startswith("db"):
+        return "db"
+    if normalized.startswith("graph"):
+        return "graph"
+    if normalized.startswith("web"):
+        return "web"
+    if normalized.startswith("agent"):
+        return "agent"
+    return "task"
 
 
 __all__ = ["plan_from_message"]

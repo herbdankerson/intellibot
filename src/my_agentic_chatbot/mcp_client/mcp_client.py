@@ -8,8 +8,24 @@ from dataclasses import dataclass
 from threading import Thread
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from fastmcp.client.client import Client as FastMCPClient
-from fastmcp.client.transports import SSETransport
+try:  # pragma: no cover - dependency is optional during certain test runs
+    from fastmcp.client.client import Client as FastMCPClient
+    from fastmcp.client.transports import SSETransport
+    _FASTMCP_AVAILABLE = True
+except ModuleNotFoundError:  # pragma: no cover - fallback for environments without FastMCP
+    _FASTMCP_AVAILABLE = False
+
+    class FastMCPClient:  # type: ignore[too-few-public-methods]
+        def __init__(self, *args, **kwargs) -> None:
+            raise RuntimeError(
+                "fastmcp is not installed. Install optional dependency to use MCP tools."
+            )
+
+    class SSETransport:  # type: ignore[too-few-public-methods]
+        def __init__(self, *args, **kwargs) -> None:
+            raise RuntimeError(
+                "fastmcp is not installed. Install optional dependency to use MCP tools."
+            )
 
 LOGGER = logging.getLogger(__name__)
 

@@ -78,6 +78,27 @@ services:
       - paradedb
       - openai-proxy
 
+  api:
+    build:
+      context: .
+      dockerfile: ops/openai-proxy/Dockerfile
+    command: ["uvicorn", "src.my_agentic_chatbot.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      LITELLM_BASE_URL: http://litellm:4000
+      DATABASE_URL: postgresql+psycopg://agent:agentpass@paradedb:5432/agentdb
+    volumes:
+      - .:/app
+    ports:
+      - "8800:8000"
+    depends_on:
+      - paradedb
+      - litellm
+      - prefect
+      - docling
+
   docling:
     image: ghcr.io/docling-project/docling-serve-cpu:latest
     restart: unless-stopped
@@ -93,6 +114,28 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: ${SEARXNG_BASE_URL:-http://localhost:8085/}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-changeme-searxng}
+      REDIS_URL: redis://searxng-redis:6379/0
+      LIMITER_REDIS_URL: redis://searxng-redis:6379/1
+    ports:
+      - "127.0.0.1:8085:8080"
+    depends_on:
+      - searxng-redis
+    volumes:
+      - searxng-config:/etc/searxng
+      - searxng-cache:/var/cache/searxng
+
+  searxng-redis:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: valkey-server --save "" --appendonly no --loglevel warning
+
 
   prefect:
     image: prefecthq/prefect:3-latest
@@ -241,6 +284,17 @@ services:
       CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
     volumes:
       - ./ops/cloudflared/dankersons-mcp.yml:/etc/cloudflared/config.yml:ro
+  cloudflared-openwebui:
+    build:
+      context: ./ops/cloudflared
+    depends_on:
+      - openwebui
+    command: ["tunnel", "run", "--token", "${CLOUDFLARE_OPENWEBUI_TUNNEL_TOKEN}"]
+    environment:
+      CLOUDFLARE_TUNNEL_TOKEN: ${CLOUDFLARE_OPENWEBUI_TUNNEL_TOKEN}
+    volumes:
+      - ./ops/cloudflared/openwebui.yml:/etc/cloudflared/config.yml:ro
+
 
 volumes:
   paradedb-data:
@@ -249,3 +303,5 @@ volumes:
   neo4j-logs:
   neo4j-plugins:
   docling-cache:
+  searxng-config:
+  searxng-cache:
