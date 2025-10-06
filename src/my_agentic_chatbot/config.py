@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     ingest_http_timeout_seconds: float = Field(
         default=15.0, alias="INGEST_HTTP_TIMEOUT_SECONDS"
     )
+    searxng_internal_url: str = Field(
+        default="http://searxng:8080", alias="SEARXNG_INTERNAL_URL"
+    )
     openwebui_database_url: Optional[str] = Field(
         default=None, alias="OPENWEBUI_DATABASE_URL"
     )

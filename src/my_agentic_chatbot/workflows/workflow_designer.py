@@ -142,6 +142,10 @@ class WorkflowDesigner:
             return WorkflowNodeType.DB_QUERY
         if tool.startswith("graph"):
             return WorkflowNodeType.GRAPH_QUERY
+        if tool.startswith("neo4j"):
+            return WorkflowNodeType.GRAPH_QUERY
+        if tool.startswith("legal"):
+            return WorkflowNodeType.DB_QUERY
         if tool.startswith("web") or "search" in tool:
             return WorkflowNodeType.WEB_FETCH
         if tool.startswith("agent"):

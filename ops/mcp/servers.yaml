@@ -1,14 +1,10 @@
 x-version: "2024-09-25"
 servers:
   postgres:
-    url: http://localhost:4050
+    url: http://postgres-mcp:4050/sse
     token_env: POSTGRES_MCP_TOKEN
     tools:
-      - db_search
-  web:
-    url: http://localhost:4070
-    tools:
-      - web_search
+      - execute_sql
   legal:
     url: http://mcp-gateway-legal:8080
     tools:
@@ -47,3 +43,7 @@ servers:
       - validate_data_model
       - validate_node
       - validate_relationship
+  sequentialthinking:
+    url: http://mcp-gateway-sequentialthinking:8080/mcp/
+    tools:
+      - sequentialthinking

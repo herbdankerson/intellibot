@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "servers": [
+    {
+      "name": "sequentialthinking",
+      "transport": {
+        "type": "streamable-http",
+        "endpoint": "https://sequentialthinking-mcp.dankersons.com/mcp/"
+      },
+      "capabilities": ["tools"]
+    }
+  ]
+}

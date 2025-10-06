@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from html.parser import HTMLParser
 import logging
 import re
 import time
@@ -155,13 +156,19 @@ def docling_normalize(source: AcquiredSource) -> NormalizedDocument:
             filename,
             exc,
         )
-        text = source.content.decode("utf-8", errors="replace")
+        raw_html = source.content.decode("utf-8", errors="replace")
+        text = _strip_html(raw_html)
         markdown = text
         metadata = {
             "language": "und",
             "docling_error": str(exc),
             "source": dict(source.metadata),
         }
+
+    if "<" in text and ">" in text:
+        stripped = _strip_html(text)
+        if stripped:
+            text = stripped
 
     return NormalizedDocument(
         ingest_item_id=source.ingest_item_id,
@@ -879,6 +886,69 @@ def _markdown_to_text(markdown: str) -> str:
         line = line.replace("`", "")
         lines.append(line)
     return "\n".join(lines)
+
+
+class _HTMLStripper(HTMLParser):
+    """Utility that removes HTML markup while preserving readable text."""
+
+    _BLOCK_TAGS = {
+        "p",
+        "br",
+        "div",
+        "li",
+        "section",
+        "article",
+        "header",
+        "footer",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._chunks: List[str] = []
+        self._suppress_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style"}:
+            self._suppress_depth += 1
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style"} and self._suppress_depth:
+            self._suppress_depth -= 1
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._suppress_depth:
+            return
+        text = data.strip()
+        if text:
+            self._chunks.append(text)
+
+    def get_text(self) -> str:
+        combined = " ".join(self._chunks)
+        return re.sub(r"\s+", " ", combined).strip()
+
+
+def _strip_html(raw_html: str) -> str:
+    if not raw_html:
+        return ""
+    stripper = _HTMLStripper()
+    try:
+        stripper.feed(raw_html)
+    except Exception:  # pragma: no cover - defensive against malformed markup
+        return re.sub(r"<[^>]+>", " ", raw_html)
+    text = stripper.get_text()
+    if not text:
+        return re.sub(r"<[^>]+>", " ", raw_html)
+    return text
 
 
 

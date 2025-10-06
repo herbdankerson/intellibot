@@ -57,9 +57,13 @@ from ..schemas import (
     Plan,
     TaskStatus,
 )
-from ..tools.db_tools import DatabaseTool
-from ..tools.graph_tools import GraphTool
-from ..tools.web_tools import WebTool
+from ..tools import (
+    DatabaseTool,
+    GraphTool,
+    MCPJsonTool,
+    SequentialThinkingTool,
+    WebTool,
+)
 from ..run_logging import AgentRunLogger
 from ..util.text import (
     clip_to_token_budget,
@@ -96,7 +100,27 @@ class ToolSuite:
     db: DatabaseTool
     graph: GraphTool
     web: WebTool
+    sequential: SequentialThinkingTool
+    neo4j_cypher: MCPJsonTool
+    neo4j_memory: MCPJsonTool
+    neo4j_modeling: MCPJsonTool
+    legal: MCPJsonTool
     agents: Dict[str, CustomAgentRunner] = field(default_factory=dict)
+    registry: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.registry = {
+            "db_search": lambda task: self.db.execute(task, limit=policies.MAX_EVIDENCE_ITEMS),
+            "graph_search": lambda task: self.graph.execute(task),
+            "web_search": lambda task: self.web.execute(task, limit=policies.MAX_WEB_RESULTS),
+            "agent-sequentialthinking": self.sequential.execute,
+            "neo4j_cypher": self.neo4j_cypher.execute,
+            "neo4j_memory": self.neo4j_memory.execute,
+            "neo4j_modeling": self.neo4j_modeling.execute,
+            "legal_search": self.legal.execute,
+        }
+        for name, runner in self.agents.items():
+            self.registry[name] = runner.execute
 
 
 @dataclass
@@ -544,17 +568,43 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 {"reason": summary},
                 status="audit_failed",
             )
+        findings = audit_report.findings if audit_report else []
         blocking_finding = next(
-            (
-                finding
-                for finding in audit_report.findings
-                if finding.severity == "error"
-            ),
+            (finding for finding in findings if finding.severity == "error"),
             None,
         )
         message_reason = blocking_finding.message if blocking_finding else summary
+
+        if findings:
+            formatted_findings = "\n".join(
+                f"- {finding.severity.upper()}: {finding.message}"
+                for finding in findings
+            )
+        else:
+            formatted_findings = "- Detailed findings were not provided."
+
+        coverage_items = (
+            audit_report.coverage.items() if audit_report and audit_report.coverage else []
+        )
+        coverage_lines = [
+            f"- {criterion}: {'met' if covered else 'not met'}"
+            for criterion, covered in coverage_items
+        ]
+        coverage_section = (
+            "\n\nAcceptance criteria status:\n" + "\n".join(coverage_lines)
+            if coverage_lines
+            else ""
+        )
+
+        answer_text = (
+            "I ran the audit pass and it flagged items that need your review before we lock this down.\n"
+            "Here is what I found:\n"
+            f"{formatted_findings}{coverage_section}\n\n"
+            "Could you let me know how you'd like me to proceed—collect more evidence, revise the answer, or accept as-is?"
+        )
+
         fallback = AgentResponse(
-            answer="Audit checks flagged issues requiring human review.",
+            answer=answer_text,
             citations=response.citations if response else [],
             confidence=0.0,
             unresolved_questions=[message_reason],
@@ -616,24 +666,9 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
 
 def run_tool(tool_suite: ToolSuite, node: WorkflowNode) -> List[EvidenceItem]:
     task = node.task
-    if node.node_type == WorkflowNodeType.DB_QUERY:
-        return tool_suite.db.execute(task, limit=policies.MAX_EVIDENCE_ITEMS)
-    if node.node_type == WorkflowNodeType.GRAPH_QUERY:
-        return tool_suite.graph.execute(task)
-    if node.node_type == WorkflowNodeType.WEB_FETCH:
-        return tool_suite.web.execute(task, limit=policies.MAX_WEB_RESULTS)
-    if node.node_type == WorkflowNodeType.CUSTOM_AGENT:
-        runner = tool_suite.agents.get(task.tool)
-        if runner is None:
-            LOGGER.warning(
-                "Custom agent missing runner",
-                extra={"tool": task.tool, "task_id": node.id},
-            )
-            return []
-        return runner.execute(task)
-    runner = tool_suite.agents.get(task.tool)
+    runner = tool_suite.registry.get(task.tool)
     if runner is not None:
-        return runner.execute(task)
+        return runner(task)
     LOGGER.warning("Unsupported workflow node", extra={"node": node.node_type.value})
     return []
 
@@ -706,6 +741,31 @@ class WorkflowOrchestrator:
             db=db_tool or DatabaseTool(),
             graph=graph_tool or GraphTool(),
             web=web_tool or WebTool(),
+            sequential=SequentialThinkingTool(
+                server_name="sequentialthinking",
+                default_tool="sequentialthinking",
+                id_prefix="seq",
+            ),
+            neo4j_cypher=MCPJsonTool(
+                server_name="neo4j-cypher",
+                default_tool="read_neo4j_cypher",
+                id_prefix="neo4j",
+            ),
+            neo4j_memory=MCPJsonTool(
+                server_name="neo4j-memory",
+                default_tool="search_memories",
+                id_prefix="memory",
+            ),
+            neo4j_modeling=MCPJsonTool(
+                server_name="neo4j-modeling",
+                default_tool="list_example_data_models",
+                id_prefix="model",
+            ),
+            legal=MCPJsonTool(
+                server_name="legal",
+                default_tool="search",
+                id_prefix="legal",
+            ),
             agents=custom_agents or self._build_custom_agents(),
         )
         self.responder = responder or Responder()

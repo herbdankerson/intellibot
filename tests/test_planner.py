@@ -43,7 +43,7 @@ def test_plan_contains_budgeted_db_task() -> None:
     assert first_task.tool == "db_search"
     assert first_task.budget_tokens == policies.DEFAULT_DB_BUDGET_TOKENS
     assert first_task.timeout_seconds == policies.DEFAULT_DB_TIMEOUT_SECONDS
-    assert first_task.inputs == {}
+    assert first_task.inputs.get("query")
     assert first_task.depends_on == []
 
 

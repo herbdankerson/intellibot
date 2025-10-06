@@ -10,6 +10,10 @@ from typing import Any, Dict, Iterable
 
 from ..agents import get_agent_catalog, get_agent_config, planner_tool_hints
 from ..config import get_settings
+from ..constants import (
+    DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
+    DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
+)
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..run_logging import AgentRunLogger
 from ..schemas import Plan
@@ -78,25 +82,36 @@ def _build_messages(user_message: str) -> Iterable[LLMMessage]:
     rubric_prompt = _load_prompt("rubrics.md")
     budget_guidance = (
         "Database budget: {db_tokens} tokens / {db_timeout}s. "
-        "Graph budget: {graph_tokens} tokens / {graph_timeout}s (requires approval). "
-        "Web budget: {web_tokens} tokens / {web_timeout}s."
+        "Sequential thinking budget: {seq_tokens} tokens / {seq_timeout}s. "
+        "Specialist agents have their own budgets and may require approval."
     ).format(
         db_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
         db_timeout=policies.DEFAULT_DB_TIMEOUT_SECONDS,
-        graph_tokens=policies.DEFAULT_GRAPH_BUDGET_TOKENS,
-        graph_timeout=policies.DEFAULT_GRAPH_TIMEOUT_SECONDS,
-        web_tokens=policies.DEFAULT_WEB_BUDGET_TOKENS,
-        web_timeout=policies.DEFAULT_WEB_TIMEOUT_SECONDS,
+        seq_tokens=DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
+        seq_timeout=DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
     )
     tool_hints = planner_tool_hints()
-    agent_guidance = "Available agents/tools:\n" + "\n".join(tool_hints) if tool_hints else ""
+    catalog = get_agent_catalog()
+    specialist = [
+        descriptor.planner_hint()
+        for descriptor in catalog.values()
+        if not descriptor.planner_visible
+    ]
+    agent_guidance = "Available orchestration agents:\n" + "\n".join(tool_hints) if tool_hints else ""
+    specialist_guidance = (
+        "\nSpecialised execution agents (delegate tasks to them via plan entries):\n"
+        + "\n".join(specialist)
+        if specialist
+        else ""
+    )
     schema_prompt = (
         "Respond with a JSON object containing keys: goals, assumptions, info_needed, tasks, "
         "stop_conditions, acceptance_criteria. The tasks array must contain objects with the "
         "fields id, description, tool, budget_tokens, timeout_seconds, requires_approval."
     )
     system_content = (
-        f"{system_prompt}\n\nRubrics:\n{rubric_prompt}\n\n{budget_guidance}\n{agent_guidance}\n{schema_prompt}"
+        f"{system_prompt}\n\nRubrics:\n{rubric_prompt}\n\n{budget_guidance}\n"
+        f"{agent_guidance}{specialist_guidance}\n{schema_prompt}"
     )
     user_content = (
         f"User request: {user_message}\n"
@@ -146,6 +161,21 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
     payload.setdefault("goals", [goal])
     payload.setdefault("assumptions", [])
     payload.setdefault("info_needed", [goal])
+    if isinstance(payload["info_needed"], list):
+        normalized_info = []
+        for item in payload["info_needed"]:
+            if isinstance(item, dict):
+                for key in ("description", "text", "value"):
+                    if key in item:
+                        normalized_info.append(str(item[key]))
+                        break
+                else:
+                    normalized_info.append(json.dumps(item, sort_keys=True))
+            else:
+                normalized_info.append(str(item))
+        payload["info_needed"] = normalized_info
+    else:
+        payload["info_needed"] = [str(payload["info_needed"])]
     payload.setdefault("stop_conditions", ["Acceptance criteria satisfied"])
     payload.setdefault(
         "acceptance_criteria",
@@ -164,6 +194,10 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
         if not isinstance(task, dict):
             raise ValueError("Planner tasks must be objects")
         tool = str(task.get("tool", "")).strip()
+        description = str(task.get("description", "")).strip()
+        if tool == "db_search" and _should_use_web(description):
+            tool = "web_search"
+            task["tool"] = tool
         descriptor = catalog.get(tool)
         task.setdefault(
             "budget_tokens",
@@ -186,12 +220,19 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
         task["id"] = identifier
         requires_approval = descriptor.requires_approval if descriptor else tool == "graph_search"
         task.setdefault("requires_approval", requires_approval)
-        description = str(task.get("description", "")).strip()
         if not description:
-            task["description"] = f"Run {tool or 'a tool'} for: {goal}"
+            description = f"Run {tool or 'a tool'} for: {goal}"
+            task["description"] = description
         inputs = task.setdefault("inputs", {})
         if isinstance(inputs, dict):
-            task["inputs"] = {str(key): value for key, value in inputs.items()}
+            normalized_inputs = {str(key): value for key, value in inputs.items()}
+            if tool in {"db_search", "web_search"}:
+                query_value = normalized_inputs.get("query")
+                if not isinstance(query_value, str) or not query_value.strip():
+                    suggested = _suggest_query(description)
+                    if suggested:
+                        normalized_inputs["query"] = suggested
+            task["inputs"] = normalized_inputs
         else:
             task["inputs"] = {}
         dependencies = task.setdefault("depends_on", [])
@@ -209,17 +250,89 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
     return payload
 
 
+def _should_use_web(description: str) -> bool:
+    lowered = description.lower()
+    return any(
+        keyword in lowered
+        for keyword in (
+            "trial procedure",
+            "trial procedures",
+            "case preparation",
+            "case-preparation",
+            "actionable advice",
+            "best practices",
+            "checklist",
+            "web search",
+        )
+    )
+
+
 def _default_prefix(tool: str) -> str:
     normalized = tool or "task"
     if normalized.startswith("db"):
         return "db"
     if normalized.startswith("graph"):
         return "graph"
+    if normalized.startswith("neo4j"):
+        return "neo4j"
+    if normalized.startswith("legal"):
+        return "legal"
     if normalized.startswith("web"):
         return "web"
     if normalized.startswith("agent"):
         return "agent"
     return "task"
+
+
+_QUERY_CLEAN_RE = re.compile(
+    r"^(?:(?:search|find|retrieve|gather|look\s+up)\s+"
+    r"(?:(?:(?:the|all)\s+)?(?:database|web|graph|knowledge\s+base)\s+)?(?:for|about)\s+)",
+    re.IGNORECASE,
+)
+
+_LEADING_PHRASE_RE = re.compile(
+    r"^(?:(?:key\s+)?details\s+about|information\s+on|insights\s+into|overview\s+of|"
+    r"summary\s+of|guide\s+to|practical\s+guidance\s+on|strategies\s+for|"
+    r"(?:biographical|professional)\s+(?:and\s+)?(?:professional\s+)?(?:history|background)\s+of|"
+    r"(?:actionable|practical)\s+advice\s+on)\s+",
+    re.IGNORECASE,
+)
+
+
+def _suggest_query(description: str) -> str:
+    """Derive a default query string from a planner task description."""
+
+    cleaned = description.strip()
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    if "judge brewer" in lowered and any(term in lowered for term in ("background", "career", "professional")):
+        return "Judge Danielle Brewer background"
+    if "trial procedure" in lowered:
+        return "civil trial procedures step-by-step"
+    if any(term in lowered for term in ("case preparation", "actionable advice", "best practices")):
+        return "trial preparation checklist"
+    cleaned = _QUERY_CLEAN_RE.sub("", cleaned)
+    cleaned = cleaned.strip().rstrip(".")
+    cleaned = _LEADING_PHRASE_RE.sub("", cleaned)
+    cleaned = cleaned.replace("'s", "")
+    cleaned = cleaned.rstrip(",")
+    cleaned = re.sub(r"\bfocusing\s+on\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bcovering\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bincluding\b", " ", cleaned, flags=re.IGNORECASE)
+    for sep in (" including ", " such as ", " covering "):
+        if sep in cleaned:
+            cleaned = cleaned.split(sep, 1)[0]
+            break
+    if cleaned.lower().startswith("the "):
+        cleaned = cleaned[4:]
+    if cleaned.lower().startswith("a "):
+        cleaned = cleaned[2:]
+    if cleaned.lower().startswith("an "):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.replace(",", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
 
 
 __all__ = ["plan_from_message"]

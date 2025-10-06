@@ -18,7 +18,13 @@ from ..constants import (
     DEFAULT_DB_BUDGET_TOKENS,
     DEFAULT_DB_TIMEOUT_SECONDS,
     DEFAULT_GRAPH_BUDGET_TOKENS,
+    DEFAULT_GRAPH_MEMORY_BUDGET_TOKENS,
+    DEFAULT_GRAPH_MEMORY_TIMEOUT_SECONDS,
+    DEFAULT_GRAPH_MODELING_BUDGET_TOKENS,
+    DEFAULT_GRAPH_MODELING_TIMEOUT_SECONDS,
     DEFAULT_GRAPH_TIMEOUT_SECONDS,
+    DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
+    DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
     DEFAULT_WEB_BUDGET_TOKENS,
     DEFAULT_WEB_TIMEOUT_SECONDS,
 )
@@ -110,6 +116,7 @@ class AgentDescriptor:
     default_budget_tokens: int
     default_timeout_seconds: int
     requires_approval: bool = False
+    planner_visible: bool = True
     agent_config_name: str | None = None
 
     def planner_hint(self) -> str:
@@ -168,25 +175,61 @@ def get_agent_catalog() -> Dict[str, AgentDescriptor]:
     catalog: Dict[str, AgentDescriptor] = {
         "db_search": AgentDescriptor(
             tool="db_search",
-            description="Hybrid Postgres search (BM25 + pgvector snippets)",
+            description="Hybrid ParadeDB search (BM25 + pgvector snippets)",
             runtime="mcp",
             default_budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
             default_timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
         ),
-        "graph_search": AgentDescriptor(
-            tool="graph_search",
-            description="Neo4j graph explorer for multi-hop relationship questions",
+        "web_search": AgentDescriptor(
+            tool="web_search",
+            description="SearxNG toolbox search with fetch + summarize",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_WEB_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_WEB_TIMEOUT_SECONDS,
+            planner_visible=False,
+        ),
+        "neo4j_cypher": AgentDescriptor(
+            tool="neo4j_cypher",
+            description="Neo4j Cypher query agent for graph exploration",
             runtime="mcp",
             default_budget_tokens=DEFAULT_GRAPH_BUDGET_TOKENS,
             default_timeout_seconds=DEFAULT_GRAPH_TIMEOUT_SECONDS,
             requires_approval=True,
+            planner_visible=False,
         ),
-        "web_search": AgentDescriptor(
-            tool="web_search",
-            description="SearxNG metasearch returning compact web snippets",
+        "neo4j_memory": AgentDescriptor(
+            tool="neo4j_memory",
+            description="Neo4j memory agent for entity & observation store",
             runtime="mcp",
-            default_budget_tokens=DEFAULT_WEB_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_WEB_TIMEOUT_SECONDS,
+            default_budget_tokens=DEFAULT_GRAPH_MEMORY_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_GRAPH_MEMORY_TIMEOUT_SECONDS,
+            requires_approval=True,
+            planner_visible=False,
+        ),
+        "neo4j_modeling": AgentDescriptor(
+            tool="neo4j_modeling",
+            description="Neo4j data-modeling agent (schema + validation)",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_GRAPH_MODELING_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_GRAPH_MODELING_TIMEOUT_SECONDS,
+            requires_approval=True,
+            planner_visible=False,
+        ),
+        "legal_search": AgentDescriptor(
+            tool="legal_search",
+            description="Legal knowledge MCP search (ParadeDB legal corpus)",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
+            planner_visible=False,
+        ),
+        "agent-sequentialthinking": AgentDescriptor(
+            tool="agent-sequentialthinking",
+            description="Sequential Thinking MCP agent for reflective planning",
+            runtime="mcp",
+            default_budget_tokens=DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
+            default_timeout_seconds=DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
+            planner_visible=True,
         ),
     }
 
@@ -209,7 +252,11 @@ def get_agent_catalog() -> Dict[str, AgentDescriptor]:
 def planner_tool_hints() -> List[str]:
     """Return formatted strings describing available tools for prompt inclusion."""
 
-    return [descriptor.planner_hint() for descriptor in get_agent_catalog().values()]
+    return [
+        descriptor.planner_hint()
+        for descriptor in get_agent_catalog().values()
+        if descriptor.planner_visible
+    ]
 
 
 def iter_custom_agent_descriptors() -> Iterable[AgentDescriptor]:

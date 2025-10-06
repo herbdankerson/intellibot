@@ -1,10 +1,12 @@
-"""Web search helper backed by the SearxNG MCP server."""
+"""Web search helper backed by SearxNG via MCP or direct HTTP fallback."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
+
+import httpx
 
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
@@ -22,10 +24,11 @@ class WebTool:
     snippet_chars: int = 240
     client: MCPClient | None = None
     tool_name: str | None = None
+    searx_base_url: str | None = None
     profiles: Dict[str, Dict[str, Any]] = field(
         default_factory=lambda: {
-            "quick": {"engines": ["google"], "num_pages": 1},
-            "deep": {"engines": ["google", "bing", "duckduckgo"], "num_pages": 2},
+            "quick": {"engines": ["duckduckgo", "google"], "num_pages": 1},
+            "deep": {"engines": ["duckduckgo", "google", "bing"], "num_pages": 2},
             "code": {"engines": ["github", "stack_overflow"], "categories": ["it"]},
             "legal": {"engines": ["law_arxiv", "courtlistener"], "categories": ["law"]},
             "academic": {"engines": ["semantic_scholar", "arxiv"], "categories": ["science"]},
@@ -33,11 +36,15 @@ class WebTool:
     )
 
     def __post_init__(self) -> None:
+        settings = get_settings()
+        self.searx_base_url = settings.searxng_internal_url.rstrip("/")
         if self.client is None:
             try:
-                config = get_settings().mcp_server("web")
+                config = settings.mcp_server("web")
             except KeyError:
-                LOGGER.debug("Web MCP config missing; WebTool will operate in stub mode")
+                LOGGER.debug(
+                    "Web MCP config missing; falling back to direct SearxNG HTTP client"
+                )
                 return
             self.tool_name = self.tool_name or self._default_tool(config)
             self.client = MCPClient(
@@ -56,12 +63,20 @@ class WebTool:
             return []
         limit = self._resolve_limit(task, limit)
         timeout = max(1, task.timeout_seconds)
-        if not self.client or not self.tool_name:
-            return self._stub_response(query, limit)
         arguments = self._build_arguments(task, query, limit, timeout)
-        response = self.client.call_tool_sync(self.tool_name, arguments)
+        if not self.client or not self.tool_name:
+            return self._direct_search(query, limit, timeout, arguments)
+        try:
+            response = self.client.call_tool_sync(self.tool_name, arguments)
+        except Exception as exc:  # pragma: no cover - network failures exercised via mocks
+            LOGGER.warning(
+                "MCP web search failed, falling back to direct SearxNG",
+                exc_info=exc,
+                extra={"query": query, "mode": arguments.get("profile")},
+            )
+            return self._direct_search(query, limit, timeout, arguments)
         items = self._parse_response(response, limit, arguments)
-        return items or self._stub_response(query, limit)
+        return items or self._direct_search(query, limit, timeout, arguments)
 
     def search(self, query: str) -> List[EvidenceItem]:
         """Legacy helper used by tests; returns stub evidence."""
@@ -91,7 +106,7 @@ class WebTool:
         elif isinstance(payload, list):
             rows = [entry for entry in payload if isinstance(entry, dict)]
         items = [
-            self._row_to_evidence(index, row, arguments)
+            self._row_to_evidence(index, row, arguments, retrieval_strategy="web-mcp")
             for index, row in enumerate(rows[:limit])
         ]
         return deduplicate_items(items)
@@ -101,6 +116,8 @@ class WebTool:
         index: int,
         row: Dict[str, Any],
         arguments: Dict[str, Any],
+        *,
+        retrieval_strategy: str,
     ) -> EvidenceItem:
         snippet = build_snippet(str(row.get("snippet") or row.get("content") or ""), self.snippet_chars)
         source = row.get("url") or row.get("source") or row.get("domain") or "web"
@@ -116,7 +133,7 @@ class WebTool:
             metadata[key] = str(value)
         if title:
             metadata.setdefault("title", title)
-        metadata.setdefault("retrieval_strategy", "web-mcp")
+        metadata.setdefault("retrieval_strategy", retrieval_strategy)
         profile = arguments.get("profile") or arguments.get("mode")
         if profile:
             metadata.setdefault("search_profile", str(profile))
@@ -190,6 +207,77 @@ class WebTool:
                 if key in task.inputs and task.inputs[key] not in (None, ""):
                     arguments[key] = task.inputs[key]
         return arguments
+
+    def _direct_search(
+        self,
+        query: str,
+        limit: int,
+        timeout: int,
+        arguments: Dict[str, Any],
+    ) -> List[EvidenceItem]:
+        """Query SearxNG HTTP API directly when MCP is unavailable."""
+
+        if not self.searx_base_url:
+            return self._stub_response(query, limit)
+
+        params: Dict[str, Any] = {
+            "q": query,
+            "format": "json",
+            "language": arguments.get("language", "en"),
+            "safesearch": arguments.get("safesearch", 1),
+            "num": max(1, min(limit, self.max_results)),
+        }
+        for key in ("time_range", "site", "categories"):
+            value = arguments.get(key)
+            if value:
+                params[key] = value if isinstance(value, str) else ",".join(
+                    str(item) for item in value
+                )
+        engines = arguments.get("engines")
+        if engines:
+            if isinstance(engines, list):
+                params["engines"] = ",".join(str(engine) for engine in engines)
+            else:
+                params["engines"] = str(engines)
+        else:
+            params["engines"] = "duckduckgo"
+
+        headers = {"User-Agent": "agentic-chatbot/1.0"}
+        search_url = f"{self.searx_base_url}/search"
+        try:
+            response = httpx.get(
+                search_url,
+                params=params,
+                headers=headers,
+                timeout=httpx.Timeout(timeout + 5, connect=5.0),
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:  # pragma: no cover - network fallback only
+            LOGGER.warning(
+                "Direct SearxNG search failed, returning stub evidence",
+                exc_info=exc,
+                extra={"query": query},
+            )
+            return self._stub_response(query, limit)
+
+        rows = []
+        if isinstance(payload, dict):
+            results = payload.get("results")
+            if isinstance(results, list):
+                rows = [row for row in results if isinstance(row, dict)]
+        items = [
+            self._row_to_evidence(
+                index,
+                row,
+                arguments,
+                retrieval_strategy="web-searx",
+            )
+            for index, row in enumerate(rows[:limit])
+        ]
+        if not items:
+            return self._stub_response(query, limit)
+        return deduplicate_items(items)
 
 
 __all__ = ["WebTool"]

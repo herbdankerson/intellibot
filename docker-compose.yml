@@ -271,6 +271,20 @@ services:
       - ./ops/mcp/neo4j-modeling/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./ops/mcp/neo4j-modeling/manifest.json:/etc/nginx/manifests/neo4j-modeling.json:ro
 
+  sequentialthinking-mcp:
+    build:
+      context: ./ops/mcp/sequentialthinking
+    restart: unless-stopped
+
+  mcp-gateway-sequentialthinking:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - sequentialthinking-mcp
+    volumes:
+      - ./ops/mcp/sequentialthinking/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ops/mcp/sequentialthinking/manifest.json:/etc/nginx/manifests/sequentialthinking.json:ro
+
   cloudflared:
     build:
       context: ./ops/cloudflared
