@@ -21,13 +21,11 @@ def test_mcp_json_tool_stub_when_config_missing() -> None:
     tool = MCPJsonTool(server_name="missing-server", id_prefix="test")
     task = _make_task("neo4j_cypher", "List nodes", {"arguments": {"query": "MATCH (n) RETURN n"}})
     evidence = tool.execute(task)
-    assert evidence
-    assert evidence[0].metadata["mcp_server"] == "missing-server"
+    assert evidence == []
 
 
 def test_sequential_thinking_tool_builds_defaults() -> None:
     tool = SequentialThinkingTool(server_name="missing-server", id_prefix="seq")
     task = _make_task("agent-sequentialthinking", "Consider next steps", {})
     evidence = tool.execute(task)
-    assert evidence
-    assert "Consider next steps" in evidence[0].content
+    assert evidence == []

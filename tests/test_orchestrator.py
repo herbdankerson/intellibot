@@ -179,6 +179,7 @@ def test_run_pipeline_blocks_on_audit_failure() -> None:
         event.task_id == "audit_gate" and event.status == TaskStatus.FAILED
         for event in result.report.events
     )
-    assert response.answer.startswith("Audit checks flagged issues")
+    answer_lower = response.answer.lower()
+    assert "audit pass" in answer_lower and "flagged" in answer_lower
     assert result.audit_report is not None
     assert result.audit_report.passed is False

@@ -6,19 +6,19 @@ servers:
     tools:
       - execute_sql
   legal:
-    url: http://mcp-gateway-legal:8080
+    url: http://mcp-gateway-legal:8080/mcp/
     tools:
       - ingest_websites
       - search
       - fetch
   neo4j-cypher:
-    url: http://mcp-gateway-neo4j-cypher:8080
+    url: http://mcp-gateway-neo4j-cypher:8080/mcp/
     tools:
       - get_neo4j_schema
       - read_neo4j_cypher
       - write_neo4j_cypher
   neo4j-memory:
-    url: http://mcp-gateway-neo4j-memory:8080
+    url: http://mcp-gateway-neo4j-memory:8080/mcp/
     tools:
       - add_observations
       - create_entities
@@ -30,7 +30,7 @@ servers:
       - read_graph
       - search_memories
   neo4j-modeling:
-    url: http://mcp-gateway-neo4j-modeling:8080
+    url: http://mcp-gateway-neo4j-modeling:8080/mcp/
     tools:
       - export_to_arrows_json
       - get_constraints_cypher_queries

@@ -9,6 +9,18 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 from ..schemas import EvidenceItem
 
 _WHITESPACE_RE = re.compile(r"\s+")
+_QUOTED_SUBJECT_RE = re.compile(r"[\"'](?P<subject>[^\"']{3,80}?)[\"']")
+_TITLED_NAME_RE = re.compile(
+    r"\b(?P<title>(?i:judge|justice|magistrate))\s+(?P<name>(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}))"
+)
+_LOCATION_FOLLOW_RE = re.compile(
+    r"\b(?:of|in|from|at)\s+(?P<location>[A-Z][^,.;\n]{2,80})",
+    re.IGNORECASE,
+)
+_LOCATION_STOP_RE = re.compile(
+    r"\b(?:and|with|whose|who|which|covering|focusing|including|seeking|supplementing|providing|for)\b",
+    re.IGNORECASE,
+)
 
 
 def squeeze_whitespace(value: str) -> str:
@@ -39,6 +51,58 @@ def deduplicate_items(items: Iterable[EvidenceItem]) -> List[EvidenceItem]:
         seen.add(fingerprint)
         unique.append(item)
     return unique
+
+
+def extract_subject_and_location(text: str) -> Tuple[str | None, str | None]:
+    """Heuristically extract a named subject and optional location from text."""
+
+    if not text:
+        return (None, None)
+
+    subject: str | None = None
+    span_end = 0
+
+    quoted_matches = list(_QUOTED_SUBJECT_RE.finditer(text))
+    if quoted_matches:
+        best = max(quoted_matches, key=lambda match: len(match.group("subject")))
+        subject_candidate = best.group("subject").strip()
+        if subject_candidate:
+            subject = subject_candidate
+            span_end = best.end()
+    else:
+        titled_matches = list(_TITLED_NAME_RE.finditer(text))
+        if titled_matches:
+            best = max(titled_matches, key=lambda match: len(match.group("name")))
+            title = best.group("title").strip()
+            name = best.group("name").strip()
+            if title and name:
+                subject = f"{title.title()} {name}"
+                span_end = best.end()
+
+    if subject is None:
+        return (None, None)
+
+    trailing = text[span_end : span_end + 240]
+    location_match = _LOCATION_FOLLOW_RE.search(trailing)
+    if not location_match:
+        return (subject, None)
+
+    location = location_match.group("location").strip()
+    remainder = trailing[location_match.end() : location_match.end() + 40]
+    if remainder.startswith(","):
+        state_match = re.match(r",\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", remainder)
+        if state_match:
+            location = f"{location} {state_match.group(1)}"
+    # Truncate when we hit stop words or punctuation that likely indicates new clause.
+    stop_match = _LOCATION_STOP_RE.search(location)
+    if stop_match:
+        location = location[: stop_match.start()].strip()
+    location = location.split(".")[0].split(";")[0]
+    location = location.replace("\n", " ")
+    location = squeeze_whitespace(location)
+    if not location:
+        return (subject, None)
+    return (subject, location.rstrip(","))
 
 
 def reciprocal_rank_fuse(
@@ -123,6 +187,7 @@ __all__ = [
     "build_snippet",
     "clip_to_token_budget",
     "deduplicate_items",
+    "extract_subject_and_location",
     "reciprocal_rank_fuse",
     "summarize_evidence",
     "squeeze_whitespace",

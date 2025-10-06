@@ -17,6 +17,7 @@ from ..constants import (
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..run_logging import AgentRunLogger
 from ..schemas import Plan
+from ..util.text import extract_subject_and_location, squeeze_whitespace
 from ..workflows import policies
 
 LOGGER = logging.getLogger(__name__)
@@ -177,6 +178,8 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
     else:
         payload["info_needed"] = [str(payload["info_needed"])]
     payload.setdefault("stop_conditions", ["Acceptance criteria satisfied"])
+    if not isinstance(payload["stop_conditions"], list):
+        payload["stop_conditions"] = [str(payload["stop_conditions"])]
     payload.setdefault(
         "acceptance_criteria",
         [
@@ -184,6 +187,8 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
             "Unresolved assumptions are captured for follow-up",
         ],
     )
+    if not isinstance(payload["acceptance_criteria"], list):
+        payload["acceptance_criteria"] = [str(payload["acceptance_criteria"])]
 
     tasks = payload.setdefault("tasks", [])
     if not isinstance(tasks, list):
@@ -229,9 +234,15 @@ def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
             if tool in {"db_search", "web_search"}:
                 query_value = normalized_inputs.get("query")
                 if not isinstance(query_value, str) or not query_value.strip():
-                    suggested = _suggest_query(description)
+                    suggested = _suggest_query(description, context=goal)
                     if suggested:
                         normalized_inputs["query"] = suggested
+                else:
+                    candidate = query_value.strip()
+                    if _needs_query_refinement(candidate):
+                        suggested = _suggest_query(description, context=goal)
+                        if suggested:
+                            normalized_inputs["query"] = suggested
             task["inputs"] = normalized_inputs
         else:
             task["inputs"] = {}
@@ -298,14 +309,49 @@ _LEADING_PHRASE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUERY_REWRITE_PREFIX_RE = re.compile(
+    r"^(?:search|find|perform|conduct|collect|gather|query|look(?:\s+up)?|retrieve)\b",
+    re.IGNORECASE,
+)
 
-def _suggest_query(description: str) -> str:
+
+def _needs_query_refinement(query: str) -> bool:
+    stripped = query.strip()
+    if not stripped:
+        return True
+    if _QUERY_REWRITE_PREFIX_RE.match(stripped):
+        return True
+    if len(stripped.split()) > 14:
+        return True
+    return False
+
+
+def _suggest_query(description: str, *, context: str | None = None) -> str:
     """Derive a default query string from a planner task description."""
 
     cleaned = description.strip()
     if not cleaned:
         return ""
-    lowered = cleaned.lower()
+    context_value = f"{cleaned} {context or ''}".strip()
+    lowered = context_value.lower()
+    subject, location = extract_subject_and_location(context_value)
+    if subject:
+        query_terms = [f'"{subject}"']
+        if location:
+            query_terms.append(location)
+        if "sarasota" not in " ".join(query_terms).lower() and "sarasota" in lowered:
+            query_terms.append("Sarasota Florida")
+        if "florida" in lowered and "florida" not in " ".join(query_terms).lower():
+            query_terms.append("Florida")
+        if any(term in lowered for term in ("biograph", "background", "education")):
+            query_terms.append("biography background")
+        if any(term in lowered for term in ("news", "recent", "article")):
+            query_terms.append("news")
+        if any(term in lowered for term in ("ruling", "opinion", "case")):
+            query_terms.append("notable cases")
+        if "judge" not in subject.lower():
+            query_terms.append("judge")
+        return squeeze_whitespace(" ".join(query_terms))
     if "judge brewer" in lowered and any(term in lowered for term in ("background", "career", "professional")):
         return "Judge Danielle Brewer background"
     if "trial procedure" in lowered:

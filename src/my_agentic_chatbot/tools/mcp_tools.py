@@ -151,26 +151,15 @@ class MCPJsonTool:
         *,
         error: str | None = None,
     ) -> List[EvidenceItem]:
-        message = json.dumps(
-            {
-                "note": "MCP tool stubbed (configuration missing)",
+        LOGGER.warning(
+            "MCP tool unavailable; returning no evidence",
+            extra={
                 "server": self.server_name,
                 "tool": tool_name or self.default_tool,
-                "arguments": arguments,
                 "error": error,
             },
-            ensure_ascii=False,
         )
-        snippet = build_snippet(message, self.snippet_chars)
-        return [
-            EvidenceItem(
-                id=f"{self.id_prefix}-stub",
-                source=f"{self.server_name}-stub",
-                content=snippet,
-                score=0.0,
-                metadata={"mcp_server": self.server_name, "tool": tool_name or "unknown"},
-            )
-        ]
+        return []
 
 
 @dataclass

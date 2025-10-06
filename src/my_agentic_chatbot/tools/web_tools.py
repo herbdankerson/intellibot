@@ -11,7 +11,12 @@ import httpx
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
 from ..schemas import EvidenceItem, PlanTask
-from ..util.text import build_snippet, deduplicate_items
+from ..util.text import (
+    build_snippet,
+    deduplicate_items,
+    extract_subject_and_location,
+    squeeze_whitespace,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -20,7 +25,7 @@ LOGGER = logging.getLogger(__name__)
 class WebTool:
     """Adapter that federates SearxNG search results through MCP."""
 
-    max_results: int = 4
+    max_results: int = 6
     snippet_chars: int = 240
     client: MCPClient | None = None
     tool_name: str | None = None
@@ -63,20 +68,20 @@ class WebTool:
             return []
         limit = self._resolve_limit(task, limit)
         timeout = max(1, task.timeout_seconds)
-        arguments = self._build_arguments(task, query, limit, timeout)
+        arguments, effective_query = self._build_arguments(task, query, limit, timeout)
         if not self.client or not self.tool_name:
-            return self._direct_search(query, limit, timeout, arguments)
+            return self._direct_search(effective_query, limit, timeout, arguments)
         try:
             response = self.client.call_tool_sync(self.tool_name, arguments)
         except Exception as exc:  # pragma: no cover - network failures exercised via mocks
             LOGGER.warning(
                 "MCP web search failed, falling back to direct SearxNG",
                 exc_info=exc,
-                extra={"query": query, "mode": arguments.get("profile")},
+                extra={"query": effective_query, "mode": arguments.get("profile")},
             )
-            return self._direct_search(query, limit, timeout, arguments)
+            return self._direct_search(effective_query, limit, timeout, arguments)
         items = self._parse_response(response, limit, arguments)
-        return items or self._direct_search(query, limit, timeout, arguments)
+        return items or self._direct_search(effective_query, limit, timeout, arguments)
 
     def search(self, query: str) -> List[EvidenceItem]:
         """Legacy helper used by tests; returns stub evidence."""
@@ -154,18 +159,11 @@ class WebTool:
         )
 
     def _stub_response(self, query: str, limit: int) -> List[EvidenceItem]:
-        snippet = build_snippet(
-            "SearxNG integration inactive; returning placeholder web search summary.",
-            self.snippet_chars,
+        LOGGER.warning(
+            "Web search unavailable; returning no evidence",
+            extra={"query": squeeze_whitespace(query)},
         )
-        item = EvidenceItem(
-            id="web-1",
-            source="web-stub",
-            content=f"{snippet} query={query}",
-            score=0.1,
-            metadata={"retrieval_strategy": "web-stub"},
-        )
-        return [item][:limit]
+        return []
 
     def _default_tool(self, config: MCPServerConfig) -> str:
         if config.tools:
@@ -175,13 +173,17 @@ class WebTool:
 
     def _build_arguments(
         self, task: PlanTask, query: str, limit: int, timeout: int
-    ) -> Dict[str, Any]:
+    ) -> tuple[Dict[str, Any], str]:
         final_limit = max(1, min(limit, self.max_results))
         arguments: Dict[str, Any] = {
             "query": query,
             "limit": final_limit,
             "timeout_seconds": timeout,
         }
+        refined_query, refinements = self._refine_query(query, hint=task.description)
+        arguments["query"] = refined_query
+        for key, value in refinements.items():
+            arguments.setdefault(key, value)
         profile_name: str | None = None
         if isinstance(task.inputs, dict):
             raw_profile = task.inputs.get("profile") or task.inputs.get("mode")
@@ -206,7 +208,37 @@ class WebTool:
             ):
                 if key in task.inputs and task.inputs[key] not in (None, ""):
                     arguments[key] = task.inputs[key]
-        return arguments
+        return arguments, refined_query
+
+    def _refine_query(self, query: str, *, hint: str | None = None) -> tuple[str, Dict[str, Any]]:
+        """Create a more targeted query and associated SearxNG tuning hints."""
+
+        baseline = query or ""
+        context = f"{baseline} {hint or ''}".strip()
+        name, location = extract_subject_and_location(context)
+        extras: Dict[str, Any] = {}
+        lowered = context.lower()
+        if name:
+            terms = [f'"{name}"']
+            if location:
+                terms.append(location)
+            if "sarasota" in lowered and "sarasota" not in " ".join(terms).lower():
+                terms.append("Sarasota Florida")
+            if "florida" in lowered and "florida" not in " ".join(terms).lower():
+                terms.append("Florida")
+            terms.append("judge")
+            if any(token in lowered for token in ("biograph", "background", "education")):
+                terms.append("biography background")
+            if any(token in lowered for token in ("news", "recent", "article", "profile")):
+                terms.append("news profile")
+            if any(token in lowered for token in ("ruling", "opinion", "case", "decision")):
+                terms.append("notable cases")
+            refined = squeeze_whitespace(" ".join(terms))
+            extras.setdefault("profile", "legal")
+            extras.setdefault("categories", ["law", "news"])
+            extras.setdefault("engines", ["google", "bing", "duckduckgo"])
+            return refined, extras
+        return squeeze_whitespace(baseline), extras
 
     def _direct_search(
         self,
