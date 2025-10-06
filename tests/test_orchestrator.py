@@ -7,10 +7,13 @@ from src.my_agentic_chatbot.schemas import (
     AuditFinding,
     AuditReport,
     EvidenceItem,
+    Finding,
     Plan,
     PlanTask,
+    Requirement,
     TaskStatus,
 )
+from src.my_agentic_chatbot.tools import ToolOutcome
 from src.my_agentic_chatbot.workflows.approver import ApprovalResult, Approver
 from src.my_agentic_chatbot.workflows.orchestrator import WorkflowOrchestrator
 from src.my_agentic_chatbot.response.responder import Responder
@@ -22,14 +25,29 @@ class StubDatabaseTool:
         self.items = items
         self.queries: list[str] = []
 
-    def search(self, query: str, limit: int | None = None):
-        self.queries.append(query)
-        return self.items[: limit or len(self.items)]
-
-    def execute(self, task: PlanTask, *, limit: int | None = None):
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+        *,
+        limit: int | None = None,
+    ) -> ToolOutcome:
         query = task.inputs.get("query") if isinstance(task.inputs, dict) else None
         self.queries.append(query or task.description)
-        return self.items[: limit or len(self.items)]
+        evidence = self.items[: limit or len(self.items)]
+        findings = [
+            Finding(
+                id=f"finding-{index + 1}",
+                requirement_id=requirement.id,
+                key=requirement.question,
+                value=item.content,
+                confidence=0.7,
+                evidence_ids=[item.id],
+                metadata={"source": item.source},
+            )
+            for index, item in enumerate(evidence)
+        ]
+        return ToolOutcome(evidence=evidence, findings=findings)
 
 
 class RejectingApprover(Approver):
@@ -69,17 +87,31 @@ class StubAuditAgent:
 
 
 def build_plan() -> Plan:
+    requirement = Requirement(
+        id="req-1",
+        question="Describe the evidence pack process",
+        priority=1,
+        quality_bar="At least one snippet",
+        stop_when_satisfied=True,
+        metadata={},
+    )
+    task = PlanTask(
+        id="db-1",
+        requirement_id=requirement.id,
+        description="Retrieve evidence",
+        tool="db_search",
+        priority=1,
+        budget_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
+        timeout_seconds=policies.DEFAULT_DB_TIMEOUT_SECONDS,
+    )
     return Plan(
-        goals=["Describe the evidence pack process"],
-        tasks=[
-            PlanTask(
-                id="db-1",
-                description="Retrieve evidence",
-                tool="db_search",
-                budget_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
-                timeout_seconds=policies.DEFAULT_DB_TIMEOUT_SECONDS,
-            )
-        ],
+        problem_spec=requirement.question,
+        acceptance_criteria=["Answer references collected evidence."],
+        requirements=[requirement],
+        tasks=[task],
+        findings=[],
+        open_questions=[],
+        stop_conditions=["Acceptance criteria met"],
     )
 
 
@@ -148,16 +180,32 @@ def test_orchestrator_executes_custom_agent() -> None:
         audit_agent=StubAuditAgent(),
     )
     plan = Plan(
-        goals=["Use custom agent"],
+        problem_spec="Use custom agent",
+        acceptance_criteria=["Incorporate agent output"],
+        requirements=[
+            Requirement(
+                id="req-1",
+                question="Collect agent evidence",
+                priority=1,
+                quality_bar="At least one snippet",
+                stop_when_satisfied=True,
+                metadata={},
+            )
+        ],
         tasks=[
             PlanTask(
                 id="agent-demo",
+                requirement_id="req-1",
                 description="Delegate to custom agent",
                 tool="agent-demo",
+                priority=1,
                 budget_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
                 timeout_seconds=policies.DEFAULT_TOOL_TIMEOUT_SECONDS,
             )
         ],
+        findings=[],
+        open_questions=[],
+        stop_conditions=["Acceptance criteria met"],
     )
     result = orchestrator.execute_plan(plan)
     assert custom_runner.calls, "Custom agent should have been executed"

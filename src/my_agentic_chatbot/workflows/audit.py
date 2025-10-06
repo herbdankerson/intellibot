@@ -97,15 +97,24 @@ class AuditAgent:
     ) -> Iterable[LLMMessage]:
         system_prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
         acceptance_lines = plan.acceptance_criteria or ["Answer must cite supporting evidence."]
-        assumption_lines = plan.assumptions or []
+        requirement_lines = [
+            f"- {req.id}: {req.question} (quality: {req.quality_bar})"
+            for req in plan.requirements
+        ]
+        finding_lines = [
+            f"- {finding.id}: {finding.value} (confidence={finding.confidence:.2f})"
+            for finding in plan.findings
+        ]
         evidence_lines = self._render_evidence(evidence.items)
         user_sections: List[str] = [
             f"User question: {question}",
             "Acceptance criteria:",
             *[f"- {line}" for line in acceptance_lines],
         ]
-        if assumption_lines:
-            user_sections.extend(["Assumptions:", *[f"- {line}" for line in assumption_lines]])
+        if requirement_lines:
+            user_sections.extend(["Requirements:", *requirement_lines])
+        if finding_lines:
+            user_sections.extend(["Collected findings:", *finding_lines])
         user_sections.extend(
             [
                 "Responder answer:",

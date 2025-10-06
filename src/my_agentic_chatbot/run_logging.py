@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from .schemas import AgentResponse, AuditReport, EvidenceItem, EvidencePack, Plan
+from .schemas import AgentResponse, AuditReport, EvidenceItem, EvidencePack, Finding, Plan
 from .storage.db import get_engine
 
 LOGGER = logging.getLogger(__name__)
@@ -166,6 +166,7 @@ class AgentRunLogger:
         status: str,
         inputs: Optional[Dict[str, Any]] = None,
         outputs: Optional[Iterable[EvidenceItem]] = None,
+        findings: Optional[Iterable[Finding]] = None,
         error: Optional[str] = None,
     ) -> None:
         payload: Dict[str, Any] = {}
@@ -173,6 +174,8 @@ class AgentRunLogger:
             payload["inputs"] = inputs
         if outputs is not None:
             payload["outputs"] = [item.model_dump() for item in outputs]
+        if findings is not None:
+            payload["findings"] = [finding.model_dump() for finding in findings]
         if error is not None:
             payload["error"] = error
         self.log_event(

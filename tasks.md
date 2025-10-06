@@ -1,175 +1,183 @@
-Below is a step-by-step guide for turning the current scaffold into a functional agentic chatbot.  Each step lists the file(s) to create or modify and outlines the key code you or your IDE should implement.  Where possible, I refer back to the existing `instructions.md` specification for context.
+You’re right—hard-coding per-topic schemas is a dead end. The planner needs to discover what’s needed from the prompt + acceptance criteria, spin up the right tasks, ask for more when it’s thin, and curate for the responder. Here’s how to make that happen without domain-specific schemas.
 
 ---
 
-## 1. Define schemas (Pydantic models)
+## The core idea: a generic, planner-driven loop (no per-domain schema)
 
-**File:** `src/my_agentic_chatbot/schemas.py`
+Give the Planner a universal JSON contract it can always emit—slots it discovers, not slots we predefine:
 
-Create Pydantic data classes for the core data contracts you described in the instructions:
+### Minimal, domain-agnostic outputs
 
-* `Task`: fields `id: str`, `intent: str`, `tool: Literal['db_keyword','db_vector','graph','web']`, `inputs: dict`, `budget_tokens: int`, `timeout_s: int`, `depends_on: list[str]`.
-* `Plan`: fields `goals: list[str]`, `assumptions: list[str]`, `info_needed: list[str]`, `tasks: list[Task]`, `acceptance_criteria: list[str]`, `stop_conditions: list[str]`.
-* `EvidenceItem`: fields `id: str`, `kind: Literal['postgres','graph','web']`, `space: str`, `doc_id: str`, `locator: str`, `heading_path: list[str]`, `snippet: str`, `score: float`, `meta: dict`.
-* `EvidencePack`: fields `budget_tokens: int`, `sources: list[EvidenceItem]`, `derived_notes: list[str]`, `missing_info: list[str]`, `redactions: list[str]`.
-* Optionally add `Run` / `Event` models to log execution state and cost.
+* ProblemSpec: what the user asked; constraints/acceptance criteria it extracted.
+* Requirements[]: dynamically discovered info needs (each has `question`, `priority`, `stop_when_found`, `quality_bar`).
+* Tasks[]: concrete tool calls proposed to satisfy requirements (with budgets/timeouts).
+* Findings[]: normalized key–value “claims” and their evidentiary support.
+* OpenQuestions[]: what’s still missing + suggested follow-up tasks.
+* StopConditions: when to stop or escalate.
 
-These models will enforce the plan and evidence formats that your Planner and Workflow Manager must return.
-
----
-
-## 2. Implement an LLM client
-
-**File:** `src/my_agentic_chatbot/llm_calls/llm_client.py`
-
-Write a lightweight wrapper around LiteLLM / OpenAI HTTP endpoints.  It should:
-
-1. Read model and API key from environment or the `ops/litellm/config.yaml` file.
-2. Provide methods like `async def chat(model_name: str, messages: list[dict], max_tokens: int) -> str`.
-3. Optionally add error/retry logic and respect per-model timeouts.
+This keeps autonomy, avoids handcrafting schemas, and gives the Workflow Agent enough structure to execute, retry, and curate.
 
 ---
 
-## 3. Implement an MCP client
+## Planner loop (autonomous, requirement-driven)
 
-**File:** `src/my_agentic_chatbot/mcp_client/mcp_client.py`
+1. Extract requirements & rubric from the user prompt (+ any acceptance criteria you pass in).
+2. Propose tasks per requirement (prioritized).
+3. Execute tasks → collect raw results.
+4. Curate results into Findings[]: key/value claims with source IDs + confidence.
+5. Evaluate gap vs. requirements (rubric) → if missing/low confidence, auto-append follow-ups.
+6. Repeat until StopConditions (met, budget/time, or diminishing returns).
 
-This module should handle synchronous calls to your MCP servers (`postgres`, `neo4j`, `web`).  It can expose a function:
-
-```python
-import httpx
-
-async def call_tool_sync(server_url: str, tool_name: str, args: dict) -> dict:
-    # Compose the POST request to the MCP server
-    resp = await httpx.post(f"{server_url}/call-tool", json={"tool": tool_name, "args": args}, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-```
-
-Read server URLs and auth tokens from `ops/mcp/servers.yaml`.
+No judge-schema, no per-domain types—just Requirements/Tasks/Findings/OpenQuestions.
 
 ---
 
-## 4. Build the tool adapters
+## Concretely: what to change (file-by-file)
 
-### 4.1 DB Tools
-
-**File:** `src/my_agentic_chatbot/tools/db_tools.py`
-
-Functions to query Postgres/ParadeDB via the MCP:
-
-* `async def keyword_search(query: str, limit: int = 12) -> list[EvidenceItem]`: call `db_keyword` tool on the Postgres MCP server; it should return snippet + locator only.
-* `async def vector_search(query: str, space: str, limit: int = 12) -> list[EvidenceItem]`: call `db_vector` tool with embeddings.
-* Use reciprocal-rank fusion (RRF) to merge results and dedupe by `(doc_id, chunk_id)`.
-* Map each row to `EvidenceItem` with `kind='postgres'`.
-
-### 4.2 Graph Tools
-
-**File:** `src/my_agentic_chatbot/tools/graph_tools.py`
-
-* `async def graph_query(question: str) -> list[EvidenceItem]`: call `neo4j_query` on the Neo4j MCP server with strict timeouts (e.g., 8 s).
-* The MCP should return truncated path summaries; convert them into `EvidenceItem` objects.
-
-### 4.3 Web Tools (SearxNG)
-
-**File:** `src/my_agentic_chatbot/tools/web_tools.py`
-
-Implement the beefed-up search agent described earlier:
-
-1. Create multiple query variants from the user’s question (e.g., synonyms, entity hints, date ranges).
-2. For each variant, call a `web_search` tool on the Web MCP server (SearxNG).  Limit to ~5–10 results.
-3. Filter results (drop ads/SEO pages), compute topicality and authority scores, deduplicate near-duplicates, and extract concise snippets.
-4. Use RRF to combine ranking signals and return the top results as `EvidenceItem` objects with `kind='web'`.
-5. Enrich results by extracting entities and upserting them into Neo4j if desired (see earlier planning).
-
----
-
-## 5. Write the Planner
+### 1) Planner: make it discover, not assume
 
 **File:** `src/my_agentic_chatbot/planner/main_planner.py`
 
-Create a function `async def plan_from_message(message: str) -> Plan`:
+* Add a PlannerSystemPrompt that forces this JSON shape (ProblemSpec, Requirements, Tasks, StopConditions).
 
-1. Build a prompt that includes only the user’s message and a high-level description of available tools (without listing tool internals) to minimize token use.
-2. Use the LLM client to call the `planner` model (e.g., via Claude or GPT-4).  Instruct the model to output a JSON object conforming to the `Plan` schema.
-3. Validate the returned JSON against the `Plan` model; assign default budgets/timeouts if missing.
+* Implement `plan_from_message(message, prior_findings=None, prior_open_questions=None) -> dict` that:
+
+  * Extracts Requirements[] (questions to answer; priority; quality_bar).
+  * Emits Tasks[] mapping to tools (`web`, `db_keyword`, `db_vector`, `graph`) with budgets/timeouts.
+  * Includes StopConditions (e.g., “if all priority-1 requirements have ≥2 indep sources & confidence ≥0.7”).
+
+* Add `revise_plan_with_evidence(plan, new_evidence) -> dict` to:
+
+  * Promote Findings[] from new evidence.
+  * Remove satisfied requirements; create follow-up Tasks for gaps (auto-ask for more).
+  * Adjust tools (e.g., escalate to `graph` if cross-checking required).
+
+**Done when:** the Planner always returns actionable tasks + a gap-aware follow-up list—no domain schema.
 
 ---
 
-## 6. Construct the Prefect workflow
+### 2) Tools: answer requirements, not just “do a search”
+
+**Files:**
+
+* `src/my_agentic_chatbot/tools/web_tools.py`
+* `src/my_agentic_chatbot/tools/db_tools.py`
+* `src/my_agentic_chatbot/tools/graph_tools.py`
+
+Upgrade each tool adapter to accept a Requirement (question + quality_bar) and return Findings candidates:
+
+* `web_tools.search_and_curate(requirement, budget)`
+
+  * Expand queries, fetch, extract atomic facts (key/value), attach snippet, heading_path, URL; estimate confidence (source type × agreement × recency); write to KB, return `EvidenceItem[]` and a list of candidate Findings `{key, value, confidence, evidence_ids[]}`.
+* `db_tools.curated_search(requirement, boost_entity=None)`
+
+  * BM25 + vector RRF, dedupe, return snippets and extracted candidate Findings.
+* `graph_tools.cross_check(findings)`
+
+  * Optional: verify consistency / link duplicates; lift agreement/confidence.
+
+**Done when:** every tool returns Findings candidates tied to EvidenceItem IDs, not just raw snippets.
+
+---
+
+### 3) Orchestrator: become the execution brain for the Planner loop
 
 **File:** `src/my_agentic_chatbot/workflows/orchestrator.py`
 
-Implement a Prefect flow `run_plan` with the following tasks:
+Implement a deterministic loop:
 
-1. **Call Planner** with the user message and get a `Plan`.
-2. **Approval #1** – Pause until the user approves or edits the plan.
-3. For each `Task` in the plan:
+1. `plan = plan_from_message(message)`
+2. Approval #1 (optional, keep it)
+3. For each Task in priority order:
 
-   * Dispatch to the appropriate tool function (`keyword_search`, `vector_search`, `graph_query`, `web_search`) based on the `Task.tool`.
-   * Respect `Task.budget_tokens` and `Task.timeout_s`.
-4. Collect all `EvidenceItem` objects into an `EvidencePack`:
+   * Call the tool adapter, get `EvidenceItem[]` + `candidate_findings[]`, append to pack.
+4. Summarize & curate: merge duplicate findings, compute confidence (agreement × authority × snippet quality), enforce EvidencePack ≤ 4k tokens (summarize at boundary).
+5. Evaluate gap: if `plan.StopConditions` not met → `plan = revise_plan_with_evidence(plan, curated_findings)` and loop (respect budgets/timeouts).
+6. Approval #2 (evidence review) → call Responder with curated Findings/Evidence.
+7. Approval #3 → finalize.
 
-   * Fuse results via RRF, dedupe, enforce the ≤4 k token cap and remove raw embeddings.
-   * Create an `ExecutionReport` summarizing costs and run metadata.
-5. **Approval #2** – Pause to review the evidence pack.
-6. **Call Response Agent** via the LLM client.  Pass the user message and the `EvidencePack`.  The prompt should instruct the model to produce a final answer with citations (mapping claims to `EvidenceItem.id`), mention confidence and note unresolved items.
-7. **Approval #3** – Final human review before returning the answer.
-8. Log the run and costs.
-
-Optionally define helper tasks like `pause_for_approval(prompt: str)` in `approver.py` and policies in `policies.py` to centralize budgets/timeouts and dedup/compaction rules.
+**Done when:** the flow automatically asks for more when the evidence is thin and stops when requirements are truly met.
 
 ---
 
-## 7. Implement the Response Agent
+### 4) Responder: consume Findings, not ad-hoc snippets
 
 **File:** `src/my_agentic_chatbot/response/responder.py`
 
-Write a function `async def respond(user_message: str, evidence_pack: EvidencePack) -> str`:
-
-1. Compose a system prompt that lists the evidence items (ID, snippet, source type) and reminds the model to cite sources and perform contradiction checks.
-2. Use the LLM client (model name `responder`) to get the final answer.  Validate that citations refer only to IDs in the `EvidencePack`; if not, request a regeneration.
+* Prompt consumes Findings[] + EvidencePack; instructs: “Only assert claims present in Findings; cite by `EvidenceItem.id`.”
+* If acceptance criteria still unmet, respond with what’s missing and recommend next tasks (mirrors OpenQuestions).
 
 ---
 
-## 8. Prepare ETL and KB scripts
+### 5) Data layer: keep it generic
 
-* **`ops/scripts/migrate.py`** – Applies `storage/models.sql` to create `kb_documents`, `kb_chunks`, `kb_embedding_space`, `kb_embeddings` as per the sidecar schema.
-* **`ops/scripts/ingest_docs.py`** – Takes a file path or URL, extracts structural blocks (headings, paragraphs, tables, code), computes `tsv` columns, and inserts into `kb_documents` and `kb_chunks`.
-* **`ops/scripts/embed_chunks.py`** – Loops over rows in `kb_documents` and `kb_chunks`, calls the embedding models (via LiteLLM) for general/code/law spaces, stores embeddings in `kb_embeddings`, and maintains HNSW indexes.
+**Files:**
 
-Write the SQL DDL in `src/my_agentic_chatbot/storage/models.sql` to match the table definitions and indexes described in the instructions.
+* `src/my_agentic_chatbot/schemas.py` → define generic types only:
 
----
+  * `Requirement { question:str, priority:int, quality_bar:str }`
+  * `Task { id, for_requirement:int, tool:Literal['web','db_keyword','db_vector','graph'], inputs:dict, budget_tokens:int, timeout_s:int }`
+  * `Finding { key:str, value:str, confidence:float, evidence_ids:list[str] }`
+  * `OpenQuestion { question:str, reason:str }`
+  * `Plan { problem_spec:str, requirements:list[Requirement], tasks:list[Task], stop_conditions:list[str] }`
+  * Keep `EvidenceItem`/`EvidencePack` as you specced.
 
-## 9. Configure ops files
-
-* **`ops/litellm/config.yaml`** – Use the sample config from the instructions: define your models (`planner`, `responder`, `cheap-worker`, `emb-general`, `emb-code`, `emb-law`), API keys, timeouts, retry policies and routing strategies.
-* **`ops/mcp/servers.yaml`** – List the MCP endpoints and tokens for Postgres, Neo4j and Web servers as shown in the instructions.
-* **`.env.example`** – Ensure environment variables for your API keys, database URLs and MCP tokens are documented.
-
----
-
-## 10. Write tests
-
-Under `src/my_agentic_chatbot/tests/`, create tests such as:
-
-* `test_planner.py` – Assert that `plan_from_message()` returns a `Plan` with non-empty tasks and budgets/timeouts.
-* `test_db_tools.py` – Mock the MCP DB server and verify that `keyword_search` and `vector_search` return no more than N rows and exclude raw embeddings.
-* `test_orchestrator.py` – Use Prefect’s testing harness to run a dummy plan through the flow and ensure the `EvidencePack` respects size caps and approvals.
-* `test_responder.py` – Check that citations refer to valid evidence IDs and that unsupported claims trigger warnings.
+No judge schema. No domain types. All dynamic.
 
 ---
 
-## 11. Run and iterate
+## How this changes behavior on your failed “Judge Brewer” run
 
-1. Set up your environment (`docker compose up`, `make migrate`, `make run-proxy`, `make run-api`).
-2. Ingest a small corpus with `python ops/scripts/ingest_docs.py` and embed with `python ops/scripts/embed_chunks.py`.
-3. Hit your FastAPI endpoint (`POST /run`) from OpenWebUI to test the full pipeline.
-4. Adjust ranking weights, timeouts and summarization logic as you see how the agent behaves.
+* Planner extracts requirements itself (e.g., “Who is the judge?”, “Education?”, “Prior career?”, “Division/case types?”, “Reputation/temperament?”, “Notable reversals?”) with a quality bar (“≥2 independent sources for education”).
+* First pass tasks: web + db. If results are directory garbage, Findings confidence stays low, so the planner adds follow-ups: “site:ballotpedia.org", “site:jud12.flcourts.org", “site:flcourts.org", "background" OR "education" OR "procedures", then fetch/extract again.
+* Tools write to KB and return candidate Findings so the orchestrator can compute agreement and keep looping until StopConditions or budget.
+
+That’s autonomy. No per-topic handholding. It “asks for more” on its own.
 
 ---
 
-### Summary
+## Very specific edits to make it real (checklist)
 
-These steps map directly onto the missing pieces identified in `instructions.md` and incorporate the improvements we discussed (beefed-up SearxNG ranking, context discipline, retrieval fusion, subflow/state machine for the workflow agent).  They are deliberately modular so you can implement and test each component incrementally.
+1. `planner/main_planner.py`
+
+   * Add new planner system prompt and implement `plan_from_message()`, `revise_plan_with_evidence()`.
+   * Plan JSON uses only `ProblemSpec`, `Requirements[]`, `Tasks[]`, `StopConditions[]`.
+2. `tools/web_tools.py`
+
+   * Implement: `search_and_curate(requirement, budget)` → expands queries, fetches pages, extracts atomic facts, indexes to KB, returns `(evidence_items, candidate_findings)`.
+3. `tools/db_tools.py`
+
+   * Implement: `curated_search(requirement, boost_entity=None)` → BM25+vector RRF, returns `(evidence_items, candidate_findings)`.
+4. `tools/graph_tools.py`
+
+   * Optional cross-check/boost: `cross_check(findings)` and entity upsert for future searches.
+5. `workflows/orchestrator.py`
+
+   * Implement loop: Plan → Execute tasks → Curate findings → Evaluate → Revise plan (repeat) → Responder.
+6. `response/responder.py`
+
+   * Enforce “only Findings” claims + citation validation.
+7. `schemas.py`
+
+   * Add `Requirement`, `Finding`, `OpenQuestion` alongside your existing `Evidence*` models.
+
+---
+
+## Guardrails that keep this efficient (and not chatty)
+
+* Caps everywhere: per-tool N results, per-page chunks, EvidencePack ≤ 4k, timeouts (8–15s).
+* Confidence model: `(agreeing sources × authority × extract quality)`; require ≥ threshold per requirement’s `quality_bar`.
+* Retry budget: allow 1–2 follow-up waves; stop if diminishing returns (no new Findings or rising duplicates).
+* KB-first bias: after first web pass, prefer DB curated results (BM25+vector) to avoid re-fetching and keep tokens cheap.
+
+---
+
+## If you want me to write the stubs next
+
+Say “ship stubs,” and I’ll produce:
+
+* `planner/main_planner.py` with the exact prompt + JSON validators.
+* `web_tools.search_and_curate()` and `db_tools.curated_search()` skeletons (including RRF logic, snippet extractor, and KB write-backs).
+* `workflows/orchestrator.py` with the loop, gap evaluation, and stop logic.
+
+This keeps the system autonomous and generic: the Planner discovers needs, tools try to answer the questions, the loop asks for more when thin, and the Responder speaks only from curated Findings.

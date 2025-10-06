@@ -31,11 +31,14 @@ def _descriptor() -> AgentDescriptor:
 def _task() -> PlanTask:
     return PlanTask(
         id="agent-test",
+        requirement_id="req-1",
         description="Collect facts",
         tool="agent-test",
+        priority=1,
         budget_tokens=DEFAULT_CUSTOM_AGENT_BUDGET_TOKENS,
         timeout_seconds=DEFAULT_CUSTOM_AGENT_TIMEOUT_SECONDS,
         inputs={"topic": "demo"},
+        depends_on=[],
     )
 
 

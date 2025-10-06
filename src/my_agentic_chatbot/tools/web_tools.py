@@ -10,13 +10,14 @@ import httpx
 
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
-from ..schemas import EvidenceItem, PlanTask
+from ..schemas import EvidenceItem, Finding, PlanTask, Requirement
 from ..util.text import (
     build_snippet,
     deduplicate_items,
     extract_subject_and_location,
     squeeze_whitespace,
 )
+from .types import ToolOutcome
 
 LOGGER = logging.getLogger(__name__)
 
@@ -60,28 +61,41 @@ class WebTool:
         else:
             self.tool_name = self.tool_name or "web_search"
 
-    def execute(self, task: PlanTask, *, limit: int | None = None) -> List[EvidenceItem]:
-        """Execute a search task using MCP, falling back to stubbed evidence."""
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+        *,
+        limit: int | None = None,
+    ) -> ToolOutcome:
+        """Execute a search task using MCP, returning evidence and candidate findings."""
 
-        query = str(task.inputs.get("query") or task.description)
+        query = str(task.inputs.get("query") or requirement.question or task.description)
         if not query.strip():
-            return []
+            return ToolOutcome(notes=["web search skipped: empty query"])
         limit = self._resolve_limit(task, limit)
         timeout = max(1, task.timeout_seconds)
         arguments, effective_query = self._build_arguments(task, query, limit, timeout)
+        evidence: List[EvidenceItem]
         if not self.client or not self.tool_name:
-            return self._direct_search(effective_query, limit, timeout, arguments)
-        try:
-            response = self.client.call_tool_sync(self.tool_name, arguments)
-        except Exception as exc:  # pragma: no cover - network failures exercised via mocks
-            LOGGER.warning(
-                "MCP web search failed, falling back to direct SearxNG",
-                exc_info=exc,
-                extra={"query": effective_query, "mode": arguments.get("profile")},
-            )
-            return self._direct_search(effective_query, limit, timeout, arguments)
-        items = self._parse_response(response, limit, arguments)
-        return items or self._direct_search(effective_query, limit, timeout, arguments)
+            evidence = self._direct_search(effective_query, limit, timeout, arguments)
+        else:
+            try:
+                response = self.client.call_tool_sync(self.tool_name, arguments)
+                evidence = self._parse_response(response, limit, arguments)
+            except Exception as exc:  # pragma: no cover - network failures exercised via mocks
+                LOGGER.warning(
+                    "MCP web search failed, falling back to direct SearxNG",
+                    exc_info=exc,
+                    extra={"query": effective_query, "mode": arguments.get("profile")},
+                )
+                evidence = self._direct_search(effective_query, limit, timeout, arguments)
+
+        findings = self._evidence_to_findings(requirement, evidence)
+        notes: List[str] = []
+        if not evidence:
+            notes.append("web search returned no evidence")
+        return ToolOutcome(evidence=evidence, findings=findings, notes=notes)
 
     def search(self, query: str) -> List[EvidenceItem]:
         """Legacy helper used by tests; returns stub evidence."""
@@ -310,6 +324,40 @@ class WebTool:
         if not items:
             return self._stub_response(query, limit)
         return deduplicate_items(items)
+
+    def _evidence_to_findings(
+        self, requirement: Requirement, evidence: List[EvidenceItem]
+    ) -> List[Finding]:
+        findings: List[Finding] = []
+        for index, item in enumerate(evidence):
+            if not item.content.strip():
+                continue
+            base_confidence = _web_confidence(item.score)
+            findings.append(
+                Finding(
+                    id=f"finding-web-{index + 1}",
+                    requirement_id=requirement.id,
+                    key=requirement.question,
+                    value=item.content,
+                    confidence=base_confidence,
+                    evidence_ids=[item.id],
+                    metadata={"source": item.source, **item.metadata},
+                )
+            )
+        return findings
+
+
+def _web_confidence(score: float) -> float:
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        value = 0.2
+    value = max(0.0, min(1.0, value))
+    if value >= 0.8:
+        return 0.75
+    if value <= 0.1:
+        return 0.35
+    return 0.35 + value * 0.4
 
 
 __all__ = ["WebTool"]

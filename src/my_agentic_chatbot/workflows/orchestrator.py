@@ -54,6 +54,9 @@ from ..schemas import (
     ExecutionEvent,
     ExecutionReport,
     ExecutionResult,
+    Finding,
+    OpenQuestion,
+    Requirement,
     Plan,
     TaskStatus,
 )
@@ -62,6 +65,7 @@ from ..tools import (
     GraphTool,
     MCPJsonTool,
     SequentialThinkingTool,
+    ToolOutcome,
     WebTool,
 )
 from ..run_logging import AgentRunLogger
@@ -109,18 +113,35 @@ class ToolSuite:
     registry: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        def _wrap(callable_obj):
+            def _runner(task, requirement):
+                result = callable_obj(task)
+                if isinstance(result, ToolOutcome):
+                    return result
+                return ToolOutcome(evidence=result or [])
+
+            return _runner
+
         self.registry = {
-            "db_search": lambda task: self.db.execute(task, limit=policies.MAX_EVIDENCE_ITEMS),
-            "graph_search": lambda task: self.graph.execute(task),
-            "web_search": lambda task: self.web.execute(task, limit=policies.MAX_WEB_RESULTS),
-            "agent-sequentialthinking": self.sequential.execute,
-            "neo4j_cypher": self.neo4j_cypher.execute,
-            "neo4j_memory": self.neo4j_memory.execute,
-            "neo4j_modeling": self.neo4j_modeling.execute,
-            "legal_search": self.legal.execute,
+            "db_search": lambda task, requirement: self.db.execute(
+                task,
+                requirement,
+                limit=policies.MAX_EVIDENCE_ITEMS,
+            ),
+            "graph_search": lambda task, requirement: self.graph.execute(task, requirement),
+            "web_search": lambda task, requirement: self.web.execute(
+                task,
+                requirement,
+                limit=policies.MAX_WEB_RESULTS,
+            ),
+            "agent-sequentialthinking": _wrap(self.sequential.execute),
+            "neo4j_cypher": _wrap(self.neo4j_cypher.execute),
+            "neo4j_memory": _wrap(self.neo4j_memory.execute),
+            "neo4j_modeling": _wrap(self.neo4j_modeling.execute),
+            "legal_search": _wrap(self.legal.execute),
         }
         for name, runner in self.agents.items():
-            self.registry[name] = runner.execute
+            self.registry[name] = _wrap(runner.execute)
 
 
 @dataclass
@@ -133,6 +154,8 @@ class FlowRuntime:
     designer: WorkflowDesigner
     audit_agent: Optional[AuditAgent] = None
     logger: Optional[AgentRunLogger] = None
+    plan: Plan | None = None
+    findings: List[Finding] = field(default_factory=list)
 
 
 @dataclass
@@ -155,6 +178,7 @@ def workflow_runtime(
     designer: WorkflowDesigner,
     audit_agent: Optional[AuditAgent],
     logger: Optional[AgentRunLogger],
+    plan: Plan,
 ):
     global _RUNTIME
     previous = _RUNTIME
@@ -165,6 +189,8 @@ def workflow_runtime(
         designer=designer,
         audit_agent=audit_agent,
         logger=logger,
+        plan=plan,
+        findings=[],
     )
     try:
         yield
@@ -191,9 +217,9 @@ def _approve_task(node: WorkflowNode) -> ApprovalResult:
 
 
 @task(name="execute-task", persist_result=False)
-def _execute_task(node: WorkflowNode) -> List[EvidenceItem]:
+def _execute_task(node: WorkflowNode) -> ToolOutcome:
     runtime = _get_runtime()
-    return run_tool(runtime.tools, node)
+    return run_tool(runtime, node)
 
 
 @task(name="assemble-evidence", persist_result=False)
@@ -202,9 +228,23 @@ def _assemble_evidence_task(items: Sequence[EvidenceItem]) -> EvidencePack:
 
 
 @task(name="generate-response", persist_result=False)
-def _generate_response_task(message: str, pack: EvidencePack) -> AgentResponse:
+def _generate_response_task(
+    message: str,
+    pack: EvidencePack,
+    findings: Sequence[Finding],
+    acceptance: Sequence[str],
+) -> AgentResponse:
     runtime = _get_runtime()
-    return runtime.responder.respond(message, pack)
+    open_questions = []
+    if runtime.plan is not None:
+        open_questions = runtime.plan.open_questions
+    return runtime.responder.respond(
+        message,
+        pack,
+        findings=findings,
+        acceptance_criteria=list(acceptance),
+        open_questions=open_questions,
+    )
 
 
 @task(name="approve-evidence", persist_result=False)
@@ -331,7 +371,8 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
             result=ExecutionResult(evidence=empty_pack, report=report),
         )
 
-    collected: List[EvidenceItem] = []
+    collected_evidence: List[EvidenceItem] = []
+    collected_findings: List[Finding] = []
     status_map: Dict[str, TaskStatus] = {}
     completed: Set[str] = set()
     failed: Set[str] = set()
@@ -410,6 +451,7 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                     tool=node.task.tool,
                     status="policy_rejected",
                     inputs=_safe_task_inputs(node.task.inputs),
+                    findings=None,
                     error=reason,
                 )
             continue
@@ -456,7 +498,7 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 status="running",
             )
         try:
-            outputs = _execute_with_retries(node)
+            outcome = _execute_with_retries(node)
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception(
                 "Tool execution failed",
@@ -477,17 +519,19 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                     tool=node.task.tool,
                     status="failed",
                     inputs=_safe_task_inputs(node.task.inputs),
+                    findings=None,
                     error=str(exc),
                 )
             continue
-        collected.extend(outputs)
+        collected_evidence.extend(outcome.evidence)
+        collected_findings.extend(outcome.findings)
         completed.add(node.id)
         status_map[node.id] = TaskStatus.COMPLETED
         report.record(
             ExecutionEvent(
                 task_id=node.id,
                 status=TaskStatus.COMPLETED,
-                message=f"items={len(outputs)}",
+                message=f"items={len(outcome.evidence)} findings={len(outcome.findings)}",
             )
         )
         if run_logger is not None:
@@ -496,13 +540,36 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
                 tool=node.task.tool,
                 status="completed",
                 inputs=_safe_task_inputs(node.task.inputs),
-                outputs=outputs,
+                outputs=outcome.evidence,
+                findings=outcome.findings,
             )
+        if outcome.notes:
+            report.notes.extend(outcome.notes)
+
+    runtime.findings = collected_findings
+    plan.findings = list(collected_findings)
+    unsatisfied: List[OpenQuestion] = []
+    for requirement in plan.requirements:
+        satisfied = any(
+            finding.requirement_id == requirement.id and finding.confidence >= 0.5
+            for finding in collected_findings
+        )
+        if not satisfied:
+            unsatisfied.append(
+                OpenQuestion(
+                    question=requirement.question,
+                    reason="No high-confidence finding collected",
+                    requirement_id=requirement.id,
+                    suggested_tasks=[],
+                )
+            )
+    if unsatisfied:
+        plan.open_questions = unsatisfied
 
     if skipped:
         report.notes.append("Skipped tasks: " + ", ".join(sorted(skipped)))
 
-    evidence_pack = _resolve_task_result(_assemble_evidence_task(collected))
+    evidence_pack = _resolve_task_result(_assemble_evidence_task(collected_evidence))
     if run_logger is not None:
         run_logger.log_evidence(evidence_pack)
     evidence_decision = _resolve_task_result(_approve_evidence_task(evidence_pack))
@@ -545,7 +612,14 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
         result = ExecutionResult(evidence=evidence_pack, report=report, audit_report=None)
         return FlowOutput(response=None, result=result)
 
-    response = _resolve_task_result(_generate_response_task(message, evidence_pack))
+    response = _resolve_task_result(
+        _generate_response_task(
+            message,
+            evidence_pack,
+            tuple(collected_findings),
+            tuple(plan.acceptance_criteria),
+        )
+    )
     if run_logger is not None and response is not None:
         run_logger.log_response(response)
     audit_report = _resolve_task_result(
@@ -664,23 +738,48 @@ def _agentic_workflow_flow(message: str, plan: Plan, deliver_response: bool) -> 
     return FlowOutput(response=response, result=result, audit_report=audit_report)
 
 
-def run_tool(tool_suite: ToolSuite, node: WorkflowNode) -> List[EvidenceItem]:
+def run_tool(runtime: FlowRuntime, node: WorkflowNode) -> ToolOutcome:
     task = node.task
-    runner = tool_suite.registry.get(task.tool)
-    if runner is not None:
-        return runner(task)
-    LOGGER.warning("Unsupported workflow node", extra={"node": node.node_type.value})
-    return []
+    plan = runtime.plan
+    requirement = None
+    if plan is not None:
+        try:
+            requirement = plan.requirement(task.requirement_id)
+        except KeyError:
+            requirement = None
+    if requirement is None:
+        requirement = Requirement(
+            id=getattr(task, "requirement_id", task.id),
+            question=task.description,
+            priority=getattr(task, "priority", 1) or 1,
+            quality_bar="At least one trustworthy source.",
+            stop_when_satisfied=True,
+            metadata={},
+        )
+    runner = runtime.tools.registry.get(task.tool)
+    if runner is None:
+        LOGGER.warning("Unsupported workflow node", extra={"node": node.node_type.value})
+        return ToolOutcome()
+    outcome = runner(task, requirement)
+    if not isinstance(outcome, ToolOutcome):
+        evidence = outcome or []
+        outcome = ToolOutcome(evidence=list(evidence))
+    runtime.findings.extend(outcome.findings)
+    return outcome
 
 
-def _execute_with_retries(node: WorkflowNode) -> List[EvidenceItem]:
+def _execute_with_retries(node: WorkflowNode) -> ToolOutcome:
     """Execute a workflow node with retry semantics."""
 
     attempts = max(1, node.max_attempts)
     last_exc: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return _resolve_task_result(_execute_task(node))
+            result = _resolve_task_result(_execute_task(node))
+            if not isinstance(result, ToolOutcome):
+                evidence = result or []
+                result = ToolOutcome(evidence=list(evidence))
+            return result
         except Exception as exc:  # pragma: no cover - defensive guard
             last_exc = exc
             if attempt >= attempts:
@@ -698,7 +797,7 @@ def _execute_with_retries(node: WorkflowNode) -> List[EvidenceItem]:
                 time.sleep(node.retry_delay_seconds)
     if last_exc is not None:
         raise last_exc
-    return []
+    return ToolOutcome()
 
 
 def assemble_evidence(items: Iterable[EvidenceItem]) -> EvidencePack:
@@ -833,6 +932,7 @@ class WorkflowOrchestrator:
             self.designer,
             self.audit_agent,
             run_logger,
+            plan,
         ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(
@@ -856,6 +956,7 @@ class WorkflowOrchestrator:
             self.designer,
             self.audit_agent,
             run_logger,
+            plan,
         ):
             with self._prefect_settings_context():
                 output = _agentic_workflow_flow(

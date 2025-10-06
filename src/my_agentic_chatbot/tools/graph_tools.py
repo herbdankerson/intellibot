@@ -8,8 +8,9 @@ from typing import Any, Dict, List
 
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
-from ..schemas import EvidenceItem, PlanTask
+from ..schemas import EvidenceItem, Finding, PlanTask, Requirement
 from ..util.text import build_snippet
+from .types import ToolOutcome
 
 LOGGER = logging.getLogger(__name__)
 
@@ -45,27 +46,40 @@ class GraphTool:
         else:
             self.tool_name = self.tool_name or "graph_search"
 
-    def execute(self, task: PlanTask) -> List[EvidenceItem]:
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+    ) -> ToolOutcome:
         """Execute the graph task, falling back to stub evidence if needed."""
 
-        query = str(task.inputs.get("query") or task.description)
+        query = str(task.inputs.get("query") or requirement.question or task.description)
         if not query.strip():
-            return []
+            return ToolOutcome(notes=["graph query skipped: empty query"])
         limit = self._resolve_limit(task)
         timeout = max(1, task.timeout_seconds)
         if not self.client or not self.tool_name:
-            return self._stub_response(query)
-        arguments = {
-            "query": query,
-            "limit": limit,
-            "timeout_seconds": timeout,
-        }
-        response = self.client.call_tool_sync(self.tool_name, arguments)
-        rows = self._extract_rows(response)
-        if not rows:
-            return self._stub_response(query)
-        items = [self._row_to_evidence(index, row) for index, row in enumerate(rows[:limit])]
-        return items or self._stub_response(query)
+            evidence = self._stub_response(query)
+        else:
+            arguments = {
+                "query": query,
+                "limit": limit,
+                "timeout_seconds": timeout,
+            }
+            response = self.client.call_tool_sync(self.tool_name, arguments)
+            rows = self._extract_rows(response)
+            if not rows:
+                evidence = self._stub_response(query)
+            else:
+                evidence = [
+                    self._row_to_evidence(index, row)
+                    for index, row in enumerate(rows[:limit])
+                ]
+        findings = self._evidence_to_findings(requirement, evidence)
+        notes: List[str] = []
+        if not evidence:
+            notes.append("graph query produced no evidence")
+        return ToolOutcome(evidence=evidence, findings=findings, notes=notes)
 
     def search(self, query: str) -> List[EvidenceItem]:
         """Compatibility helper for legacy tests; delegates to stub mode."""
@@ -130,6 +144,27 @@ class GraphTool:
             return config.tools[0]
         LOGGER.warning("Neo4j MCP config missing tools list; defaulting to graph_search")
         return "graph_search"
+
+    def _evidence_to_findings(
+        self, requirement: Requirement, evidence: List[EvidenceItem]
+    ) -> List[Finding]:
+        findings: List[Finding] = []
+        for index, item in enumerate(evidence):
+            if not item.content.strip():
+                continue
+            confidence = 0.4 if "stub" in item.metadata.get("retrieval_strategy", "") else 0.6
+            findings.append(
+                Finding(
+                    id=f"finding-graph-{index + 1}",
+                    requirement_id=requirement.id,
+                    key=requirement.question,
+                    value=item.content,
+                    confidence=confidence,
+                    evidence_ids=[item.id],
+                    metadata={"source": item.source, **item.metadata},
+                )
+            )
+        return findings
 
 
 __all__ = ["GraphTool"]

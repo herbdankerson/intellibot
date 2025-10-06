@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Set
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -19,47 +19,164 @@ class TaskStatus(str, Enum):
     SKIPPED = "skipped"
 
 
+class Requirement(BaseModel):
+    """A unit of information the planner aims to satisfy."""
+
+    id: str = Field(..., description="Stable identifier for the requirement (e.g. req-1).")
+    question: str = Field(..., description="Natural language question to be answered.")
+    priority: int = Field(
+        default=1,
+        ge=1,
+        description="Lower numbers indicate higher priority when executing tasks.",
+    )
+    quality_bar: str = Field(
+        default="At least one high-quality, citable source.",
+        description="Expectation for evidence quality before the requirement is considered satisfied.",
+    )
+    stop_when_satisfied: bool = Field(
+        default=True,
+        description="If true, the planner may omit further tasks once confidence is high enough.",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional planner metadata (suggested entities, keywords, etc.).",
+    )
+
+
 class PlanTask(BaseModel):
     """A single actionable step emitted by the planner."""
 
     id: str = Field(..., description="Stable identifier for the task.")
-    description: str = Field(..., description="Natural language description of the task.")
+    requirement_id: str = Field(
+        ..., description="Identifier of the requirement this task primarily serves."
+    )
+    description: str = Field(
+        ..., description="Natural language description of the task and desired outcome."
+    )
     tool: str = Field(..., description="Name of the tool agent expected to execute the task.")
-    budget_tokens: int = Field(..., gt=0, description="Maximum tokens the task may consume.")
+    priority: int = Field(
+        default=1,
+        ge=1,
+        description="Lower numbers indicate earlier execution preference for the workflow designer.",
+    )
+    budget_tokens: int = Field(
+        ..., gt=0, description="Maximum tokens the task may consume, including sub-delegations."
+    )
     timeout_seconds: int = Field(..., gt=0, description="Execution timeout budget.")
     requires_approval: bool = Field(
         default=False, description="Whether human approval is required before execution."
     )
     inputs: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Structured inputs the workflow designer may bind to tool arguments.",
+        description="Structured inputs for the downstream tool or agent.",
     )
     depends_on: List[str] = Field(
         default_factory=list,
         description="Identifiers of prior tasks that must complete successfully first.",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional planner annotations (e.g. suggested follow-up heuristics).",
+    )
+
+
+class Finding(BaseModel):
+    """Structured claim derived from collected evidence."""
+
+    id: str = Field(..., description="Stable identifier for referencing within the workflow.")
+    requirement_id: Optional[str] = Field(
+        default=None, description="Requirement this finding supports, if any."
+    )
+    key: str = Field(..., description="Short label describing the claim.")
+    value: str = Field(..., description="The textual content of the claim.")
+    confidence: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Planner-estimated confidence that the claim is correct.",
+    )
+    evidence_ids: List[str] = Field(
+        default_factory=list,
+        description="Identifiers of evidence items supporting the claim.",
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Optional annotations (e.g. reasoning notes, disagreement flags).",
+    )
+
+
+class OpenQuestion(BaseModel):
+    """Outstanding question the planner wants to resolve in later loops."""
+
+    question: str = Field(..., description="Natural language description of the gap.")
+    reason: str = Field(
+        default="",
+        description="Why this question matters (acceptance criteria, contradictions, etc.).",
+    )
+    requirement_id: Optional[str] = Field(
+        default=None,
+        description="Requirement associated with this open question, if known.",
+    )
+    suggested_tasks: List[str] = Field(
+        default_factory=list,
+        description="Planner hints for future tasks that may close the gap.",
     )
 
 
 class Plan(BaseModel):
     """Planner output that the orchestrator consumes."""
 
-    goals: List[str] = Field(default_factory=list)
-    assumptions: List[str] = Field(default_factory=list)
-    info_needed: List[str] = Field(default_factory=list)
-    tasks: List[PlanTask] = Field(default_factory=list)
-    stop_conditions: List[str] = Field(default_factory=list)
+    problem_spec: str = Field(
+        ..., description="Concise restatement of the user's request and key context."
+    )
     acceptance_criteria: List[str] = Field(default_factory=list)
+    requirements: List[Requirement] = Field(default_factory=list)
+    tasks: List[PlanTask] = Field(default_factory=list)
+    findings: List[Finding] = Field(default_factory=list)
+    open_questions: List[OpenQuestion] = Field(default_factory=list)
+    stop_conditions: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Free-form planner metadata for the orchestrator."
+    )
 
     @model_validator(mode="after")
-    def _ensure_task_budgets(cls, model: "Plan") -> "Plan":  # type: ignore[override]
+    def _validate_relationships(cls, model: "Plan") -> "Plan":  # type: ignore[override]
+        requirement_ids: Set[str] = {req.id for req in model.requirements}
+        if len(requirement_ids) != len(model.requirements):
+            raise ValueError("Requirements must have unique identifiers")
+
         for task in model.tasks:
+            if task.requirement_id not in requirement_ids:
+                raise ValueError(
+                    f"Task {task.id} references unknown requirement {task.requirement_id}"
+                )
             if task.budget_tokens <= 0:
-                raise ValueError("Tasks must declare a positive token budget.")
+                raise ValueError(f"Task {task.id} must declare a positive token budget")
             if task.timeout_seconds <= 0:
-                raise ValueError("Tasks must declare a positive timeout.")
-            if not isinstance(task.depends_on, list):
-                raise ValueError("Task depends_on must be a list of task identifiers.")
+                raise ValueError(f"Task {task.id} must declare a positive timeout")
+
+        valid_task_ids: Set[str] = {task.id for task in model.tasks}
+        for task in model.tasks:
+            dangling = [dep for dep in task.depends_on if dep not in valid_task_ids]
+            if dangling:
+                raise ValueError(
+                    f"Task {task.id} declares unknown dependencies: {', '.join(dangling)}"
+                )
+
         return model
+
+    def requirement(self, requirement_id: str) -> Requirement:
+        """Return the requirement with the given identifier."""
+
+        for requirement in self.requirements:
+            if requirement.id == requirement_id:
+                return requirement
+        raise KeyError(requirement_id)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Dump the plan as a JSON-serializable dictionary."""
+
+        return self.model_dump()
 
 
 class AuditFinding(BaseModel):
@@ -191,13 +308,16 @@ __all__ = [
     "AgentResponse",
     "AuditFinding",
     "AuditReport",
+    "Finding",
     "EvidenceItem",
     "EvidencePack",
     "ExecutionEvent",
     "ExecutionReport",
     "ExecutionResult",
+    "OpenQuestion",
     "Plan",
     "PlanTask",
+    "Requirement",
     "TaskStatus",
     "IngestJobStatus",
     "UrlIngestRequest",

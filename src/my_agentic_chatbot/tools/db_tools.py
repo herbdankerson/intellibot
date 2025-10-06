@@ -10,8 +10,9 @@ from typing import Any, Dict, Iterable, List
 
 from ..config import MCPServerConfig, get_settings
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
-from ..schemas import EvidenceItem, PlanTask
+from ..schemas import EvidenceItem, Finding, PlanTask, Requirement
 from ..util.text import build_snippet, deduplicate_items
+from .types import ToolOutcome
 
 LOGGER = logging.getLogger(__name__)
 
@@ -62,16 +63,27 @@ class DatabaseTool:
             items = self._fallback_from_content(response.content, limit)
         return deduplicate_items(items)[:limit]
 
-    def execute(self, task: PlanTask, *, limit: int | None = None) -> List[EvidenceItem]:
-        """Run the MCP-backed search based on the plan task inputs."""
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+        *,
+        limit: int | None = None,
+    ) -> ToolOutcome:
+        """Run the MCP-backed search and derive candidate findings."""
 
-        query = str(task.inputs.get("query") or task.description)
+        query = str(task.inputs.get("query") or requirement.question or task.description)
         requested_limit = task.inputs.get("limit") if isinstance(task.inputs, dict) else None
         final_limit = limit or self.max_results
         if isinstance(requested_limit, int) and requested_limit > 0:
             final_limit = min(final_limit, requested_limit)
         timeout = task.timeout_seconds
-        return self.search(query, limit=final_limit, timeout_seconds=timeout)
+        evidence = self.search(query, limit=final_limit, timeout_seconds=timeout)
+        findings = self._evidence_to_findings(requirement, evidence)
+        notes: List[str] = []
+        if not evidence:
+            notes.append("database search returned no rows")
+        return ToolOutcome(evidence=evidence, findings=findings, notes=notes)
 
     def _default_tool(self, config: MCPServerConfig) -> str:
         if config.tools:
@@ -183,6 +195,27 @@ class DatabaseTool:
             metadata=metadata,
         )
 
+    def _evidence_to_findings(
+        self, requirement: Requirement, evidence: List[EvidenceItem]
+    ) -> List[Finding]:
+        findings: List[Finding] = []
+        for index, item in enumerate(evidence):
+            if not item.content.strip():
+                continue
+            confidence = _score_to_confidence(item.score)
+            findings.append(
+                Finding(
+                    id=f"finding-db-{index + 1}",
+                    requirement_id=requirement.id,
+                    key=requirement.question,
+                    value=item.content,
+                    confidence=confidence,
+                    evidence_ids=[item.id],
+                    metadata={"source": item.source, **item.metadata},
+                )
+            )
+        return findings
+
     def _build_search_sql(self, query: str, limit: int) -> str:
         sanitized = query.replace("'", "''")
         limit = max(1, min(limit, self.max_results))
@@ -273,6 +306,18 @@ FROM enriched;
                 )
             )
         return items
+
+
+def _score_to_confidence(score: float) -> float:
+    try:
+        value = float(score)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        return 0.25
+    if value >= 1:
+        return 0.85
+    return max(0.3, min(0.85, 0.3 + value * 0.5))
 
 
 __all__ = ["DatabaseTool"]

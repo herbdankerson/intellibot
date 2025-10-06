@@ -1,4 +1,4 @@
-"""Planner entry point that produces task plans from user messages."""
+"""Planner entry points that produce structured plans from user messages."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, List, Sequence
 
 from ..agents import get_agent_catalog, get_agent_config, planner_tool_hints
 from ..config import get_settings
@@ -16,7 +16,7 @@ from ..constants import (
 )
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..run_logging import AgentRunLogger
-from ..schemas import Plan
+from ..schemas import Finding, OpenQuestion, Plan, PlanTask, Requirement
 from ..util.text import extract_subject_and_location, squeeze_whitespace
 from ..workflows import policies
 
@@ -25,30 +25,34 @@ LOGGER = logging.getLogger(__name__)
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 _PROMPT_CACHE: Dict[str, str] = {}
 
+_JSON_ONLY_SUFFIX = (
+    "Return ONLY the JSON object. Do not wrap in Markdown. Ensure it conforms to the schema above."
+)
+
 
 def plan_from_message(
     message: str,
     *,
+    prior_findings: Sequence[Finding] | None = None,
+    prior_open_questions: Sequence[OpenQuestion] | None = None,
     model: str | None = None,
     client: LLMClient | None = None,
     logger: AgentRunLogger | None = None,
 ) -> Plan:
-    """Return a plan for the provided user message using the LiteLLM proxy."""
+    """Return a structured plan for the provided user message using the planner model."""
 
     normalized = message.strip()
     if not normalized:
         raise ValueError("Planner requires a non-empty message")
 
-    settings = get_settings()
-    agent_config = get_agent_config("planner")
-    model_aliases = settings.model_aliases()
-    model_key = model or agent_config.model
-    target_model = model_aliases.get(model_key, model_key)
-
+    planner_client, target_model = _resolve_client(model=model, client=client)
     owns_client = client is None
-    planner_client = client or LLMClient(model_name=target_model)
     try:
-        messages = _build_messages(normalized)
+        messages = _build_initial_messages(
+            normalized,
+            prior_findings=prior_findings,
+            prior_open_questions=prior_open_questions,
+        )
         if logger is not None:
             logger.log_event(
                 "planner_request",
@@ -57,40 +61,104 @@ def plan_from_message(
                     "messages": [msg.as_dict() for msg in messages],
                 },
             )
-        if isinstance(planner_client, LLMClient):
-            response = planner_client.chat(messages, agent_config=agent_config)
-        else:  # test doubles may not accept agent_config keyword
-            response = planner_client.chat(messages)
+        response = _chat(planner_client, messages)
         if logger is not None:
-            logger.log_event(
-                "planner_response_raw",
-                {"response": response},
-            )
+            logger.log_event("planner_response_raw", {"response": response})
     finally:
         if owns_client:
             planner_client.close()
 
-    payload = _parse_plan_response(response, normalized)
-    normalized_payload = _apply_defaults(payload, normalized)
+    payload = _parse_plan_response(response, fallback_problem_spec=normalized)
+    normalized_payload = _normalize_payload(payload, normalized)
     plan = Plan.model_validate(normalized_payload)
     if logger is not None:
         logger.log_plan(plan, raw_response=response)
     return plan
 
 
-def _build_messages(user_message: str) -> Iterable[LLMMessage]:
+def revise_plan_with_evidence(
+    plan: Plan,
+    *,
+    user_message: str,
+    new_findings: Sequence[Finding],
+    new_open_questions: Sequence[OpenQuestion] | None = None,
+    model: str | None = None,
+    client: LLMClient | None = None,
+    logger: AgentRunLogger | None = None,
+) -> Plan:
+    """Ask the planner to revise a plan after reviewing new findings."""
+
+    planner_client, target_model = _resolve_client(model=model, client=client)
+    owns_client = client is None
+    try:
+        messages = _build_revision_messages(
+            plan=plan,
+            user_message=user_message,
+            new_findings=new_findings,
+            new_open_questions=new_open_questions,
+        )
+        if logger is not None:
+            logger.log_event(
+                "planner_revision_request",
+                {
+                    "model": target_model,
+                    "messages": [msg.as_dict() for msg in messages],
+                },
+            )
+        response = _chat(planner_client, messages)
+        if logger is not None:
+            logger.log_event("planner_revision_response_raw", {"response": response})
+    finally:
+        if owns_client:
+            planner_client.close()
+
+    payload = _parse_plan_response(response, fallback_problem_spec=plan.problem_spec)
+    normalized_payload = _normalize_payload(payload, plan.problem_spec)
+    revised_plan = Plan.model_validate(normalized_payload)
+    if logger is not None:
+        logger.log_plan(revised_plan, raw_response=response)
+    return revised_plan
+
+
+def _resolve_client(
+    *, model: str | None, client: LLMClient | None
+) -> tuple[LLMClient, str]:
+    settings = get_settings()
+    agent_config = get_agent_config("planner")
+    model_aliases = settings.model_aliases()
+    model_key = model or agent_config.model
+    target_model = model_aliases.get(model_key, model_key)
+    if client is not None:
+        return client, target_model
+    return LLMClient(model_name=target_model), target_model
+
+
+def _chat(client: LLMClient, messages: Iterable[LLMMessage]) -> str:
+    if isinstance(client, LLMClient):
+        agent_config = get_agent_config("planner")
+        return client.chat(messages, agent_config=agent_config)
+    return client.chat(messages)
+
+
+def _build_initial_messages(
+    user_message: str,
+    *,
+    prior_findings: Sequence[Finding] | None,
+    prior_open_questions: Sequence[OpenQuestion] | None,
+) -> List[LLMMessage]:
     system_prompt = _load_prompt("planner_system.md")
     rubric_prompt = _load_prompt("rubrics.md")
     budget_guidance = (
         "Database budget: {db_tokens} tokens / {db_timeout}s. "
         "Sequential thinking budget: {seq_tokens} tokens / {seq_timeout}s. "
-        "Specialist agents have their own budgets and may require approval."
+        "Specialist agents provide their own budgets."
     ).format(
         db_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
         db_timeout=policies.DEFAULT_DB_TIMEOUT_SECONDS,
         seq_tokens=DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
         seq_timeout=DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
     )
+
     tool_hints = planner_tool_hints()
     catalog = get_agent_catalog()
     specialist = [
@@ -98,51 +166,108 @@ def _build_messages(user_message: str) -> Iterable[LLMMessage]:
         for descriptor in catalog.values()
         if not descriptor.planner_visible
     ]
-    agent_guidance = "Available orchestration agents:\n" + "\n".join(tool_hints) if tool_hints else ""
-    specialist_guidance = (
-        "\nSpecialised execution agents (delegate tasks to them via plan entries):\n"
+    tool_section = "Available orchestration tools:\n" + "\n".join(tool_hints) if tool_hints else ""
+    specialist_section = (
+        "\nSpecialised execution agents (delegate via plan tasks):\n"
         + "\n".join(specialist)
         if specialist
         else ""
     )
-    schema_prompt = (
-        "Respond with a JSON object containing keys: goals, assumptions, info_needed, tasks, "
-        "stop_conditions, acceptance_criteria. The tasks array must contain objects with the "
-        "fields id, description, tool, budget_tokens, timeout_seconds, requires_approval."
-    )
+
+    schema_prompt = _schema_prompt()
     system_content = (
         f"{system_prompt}\n\nRubrics:\n{rubric_prompt}\n\n{budget_guidance}\n"
-        f"{agent_guidance}{specialist_guidance}\n{schema_prompt}"
+        f"{tool_section}{specialist_section}\n\n{schema_prompt}\n{_JSON_ONLY_SUFFIX}"
     )
-    user_content = (
-        f"User request: {user_message}\n"
-        "Ensure the plan is minimal and references tools available via MCP or custom agents."
+
+    user_sections = [f"User request:\n{user_message.strip()}"]
+    if prior_findings:
+        serialized_findings = json.dumps([
+            finding.model_dump() for finding in prior_findings
+        ], ensure_ascii=False, indent=2)
+        user_sections.append(
+            "Existing findings (use to avoid redundant work):\n" + serialized_findings
+        )
+    if prior_open_questions:
+        serialized_questions = json.dumps(
+            [question.model_dump() for question in prior_open_questions],
+            ensure_ascii=False,
+            indent=2,
+        )
+        user_sections.append(
+            "Outstanding questions to resolve if possible:\n" + serialized_questions
+        )
+    user_sections.append(
+        "Return a plan JSON that follows the schema. Include at least one requirement."
     )
+    user_content = "\n\n".join(user_sections)
     return [
         LLMMessage(role="system", content=system_content),
         LLMMessage(role="user", content=user_content),
     ]
 
 
-def _load_prompt(filename: str) -> str:
-    cached = _PROMPT_CACHE.get(filename)
-    if cached is not None:
-        return cached
-    path = _PROMPT_DIR / filename
-    text = path.read_text(encoding="utf-8").strip()
-    _PROMPT_CACHE[filename] = text
-    return text
+def _build_revision_messages(
+    *,
+    plan: Plan,
+    user_message: str,
+    new_findings: Sequence[Finding],
+    new_open_questions: Sequence[OpenQuestion] | None,
+) -> List[LLMMessage]:
+    system_prompt = _load_prompt("planner_system.md")
+    schema_prompt = _schema_prompt()
+    rubric_prompt = _load_prompt("rubrics.md")
+
+    system_content = (
+        f"{system_prompt}\nYou are revising an existing plan. {schema_prompt}\n{_JSON_ONLY_SUFFIX}"
+    )
+
+    payload = {
+        "user_message": user_message,
+        "existing_plan": plan.model_dump(),
+        "new_findings": [finding.model_dump() for finding in new_findings],
+        "new_open_questions": [
+            question.model_dump() for question in new_open_questions or []
+        ],
+        "rubrics": rubric_prompt,
+    }
+    user_content = (
+        "Update the plan given the new evidence. Maintain IDs when the underlying "
+        "concept remains the same. Remove tasks and requirements that are satisfied, "
+        "and add follow-up tasks if necessary.\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2)
+    )
+
+    return [
+        LLMMessage(role="system", content=system_content),
+        LLMMessage(role="user", content=user_content),
+    ]
 
 
-def _parse_plan_response(response: str, fallback_goal: str) -> Dict[str, Any]:
+def _schema_prompt() -> str:
+    return (
+        "You MUST respond with a JSON object containing the keys: \n"
+        "- problem_spec (string)\n"
+        "- acceptance_criteria (array of strings)\n"
+        "- requirements (array of objects with fields id, question, priority, quality_bar, stop_when_satisfied, metadata)\n"
+        "- tasks (array of objects with fields id, requirement_id, description, tool, priority, budget_tokens, timeout_seconds, requires_approval, inputs, depends_on, metadata)\n"
+        "- findings (array of objects with fields id, requirement_id (nullable), key, value, confidence, evidence_ids, metadata)\n"
+        "- open_questions (array of objects with fields question, reason, requirement_id (nullable), suggested_tasks)\n"
+        "- stop_conditions (array of strings)\n"
+        "- metadata (object)"
+    )
+
+
+def _parse_plan_response(response: str, *, fallback_problem_spec: str) -> Dict[str, Any]:
     if not response:
         LOGGER.warning("Planner returned empty response")
-        return {"goals": [fallback_goal], "tasks": []}
+        return {"problem_spec": fallback_problem_spec, "requirements": [], "tasks": []}
     try:
-        return _extract_json_object(response)
+        parsed = _extract_json_object(response)
     except ValueError as exc:
         LOGGER.error("Failed to parse planner response", exc_info=exc)
         raise
+    return parsed
 
 
 def _extract_json_object(raw: str) -> Dict[str, Any]:
@@ -158,161 +283,333 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
     return parsed
 
 
-def _apply_defaults(payload: Dict[str, Any], goal: str) -> Dict[str, Any]:
-    payload.setdefault("goals", [goal])
-    payload.setdefault("assumptions", [])
-    payload.setdefault("info_needed", [goal])
-    if isinstance(payload["info_needed"], list):
-        normalized_info = []
-        for item in payload["info_needed"]:
-            if isinstance(item, dict):
-                for key in ("description", "text", "value"):
-                    if key in item:
-                        normalized_info.append(str(item[key]))
-                        break
-                else:
-                    normalized_info.append(json.dumps(item, sort_keys=True))
-            else:
-                normalized_info.append(str(item))
-        payload["info_needed"] = normalized_info
-    else:
-        payload["info_needed"] = [str(payload["info_needed"])]
-    payload.setdefault("stop_conditions", ["Acceptance criteria satisfied"])
-    if not isinstance(payload["stop_conditions"], list):
-        payload["stop_conditions"] = [str(payload["stop_conditions"])]
-    payload.setdefault(
-        "acceptance_criteria",
-        [
-            "Answer references evidence item identifiers",
-            "Unresolved assumptions are captured for follow-up",
+def _normalize_payload(payload: Dict[str, Any], problem_spec: str) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    normalized["problem_spec"] = str(payload.get("problem_spec") or problem_spec)
+    normalized["acceptance_criteria"] = _ensure_str_list(
+        payload.get("acceptance_criteria"),
+        fallback=[
+            "Final answer must cite evidence IDs",
+            "Highlight any unresolved questions",
         ],
     )
-    if not isinstance(payload["acceptance_criteria"], list):
-        payload["acceptance_criteria"] = [str(payload["acceptance_criteria"])]
 
-    tasks = payload.setdefault("tasks", [])
-    if not isinstance(tasks, list):
-        raise ValueError("Planner tasks must be a list")
+    requirements = payload.get("requirements")
+    normalized_requirements = _normalize_requirements(requirements, problem_spec)
+    normalized["requirements"] = normalized_requirements
 
-    catalog = get_agent_catalog()
-    for index, task in enumerate(tasks):
-        if not isinstance(task, dict):
-            raise ValueError("Planner tasks must be objects")
-        tool = str(task.get("tool", "")).strip()
-        description = str(task.get("description", "")).strip()
-        if tool == "db_search" and _should_use_web(description):
-            tool = "web_search"
-            task["tool"] = tool
-        descriptor = catalog.get(tool)
-        task.setdefault(
-            "budget_tokens",
-            descriptor.default_budget_tokens if descriptor else policies.DEFAULT_DB_BUDGET_TOKENS,
-        )
-        task.setdefault(
-            "timeout_seconds",
-            descriptor.default_timeout_seconds if descriptor else policies.DEFAULT_DB_TIMEOUT_SECONDS,
-        )
-        identifier_value = task.get("id", "")
-        if isinstance(identifier_value, (int, float)):
-            if isinstance(identifier_value, float) and identifier_value.is_integer():
-                identifier = str(int(identifier_value))
-            else:
-                identifier = str(identifier_value)
-        else:
-            identifier = str(identifier_value).strip()
-        if not identifier:
-            identifier = f"{_default_prefix(tool)}-{index + 1}"
-        task["id"] = identifier
-        requires_approval = descriptor.requires_approval if descriptor else tool == "graph_search"
-        task.setdefault("requires_approval", requires_approval)
-        if not description:
-            description = f"Run {tool or 'a tool'} for: {goal}"
-            task["description"] = description
-        inputs = task.setdefault("inputs", {})
-        if isinstance(inputs, dict):
-            normalized_inputs = {str(key): value for key, value in inputs.items()}
-            if tool in {"db_search", "web_search"}:
-                query_value = normalized_inputs.get("query")
-                if not isinstance(query_value, str) or not query_value.strip():
-                    suggested = _suggest_query(description, context=goal)
-                    if suggested:
-                        normalized_inputs["query"] = suggested
-                else:
-                    candidate = query_value.strip()
-                    if _needs_query_refinement(candidate):
-                        suggested = _suggest_query(description, context=goal)
-                        if suggested:
-                            normalized_inputs["query"] = suggested
-            task["inputs"] = normalized_inputs
-        else:
-            task["inputs"] = {}
-        dependencies = task.setdefault("depends_on", [])
-        if isinstance(dependencies, str):
-            task["depends_on"] = [dependencies]
-        elif isinstance(dependencies, list):
-            normalized_dependencies = []
-            for dep in dependencies:
-                dep_id = str(dep).strip()
-                if dep_id:
-                    normalized_dependencies.append(dep_id)
-            task["depends_on"] = normalized_dependencies
-        else:
-            task["depends_on"] = []
-    return payload
+    requirement_ids = [req["id"] for req in normalized_requirements]
 
+    tasks = payload.get("tasks")
+    normalized["tasks"] = _normalize_tasks(tasks, requirement_ids, problem_spec)
 
-def _should_use_web(description: str) -> bool:
-    lowered = description.lower()
-    return any(
-        keyword in lowered
-        for keyword in (
-            "trial procedure",
-            "trial procedures",
-            "case preparation",
-            "case-preparation",
-            "actionable advice",
-            "best practices",
-            "checklist",
-            "web search",
-        )
+    findings = payload.get("findings", [])
+    normalized["findings"] = _normalize_findings(findings, requirement_ids)
+
+    open_questions = payload.get("open_questions", [])
+    normalized["open_questions"] = _normalize_open_questions(open_questions, requirement_ids)
+
+    normalized["stop_conditions"] = _ensure_str_list(
+        payload.get("stop_conditions"),
+        fallback=["Acceptance criteria satisfied", "No new findings after follow-up"],
     )
 
-
-def _default_prefix(tool: str) -> str:
-    normalized = tool or "task"
-    if normalized.startswith("db"):
-        return "db"
-    if normalized.startswith("graph"):
-        return "graph"
-    if normalized.startswith("neo4j"):
-        return "neo4j"
-    if normalized.startswith("legal"):
-        return "legal"
-    if normalized.startswith("web"):
-        return "web"
-    if normalized.startswith("agent"):
-        return "agent"
-    return "task"
+    metadata = payload.get("metadata")
+    normalized["metadata"] = metadata if isinstance(metadata, dict) else {}
+    return normalized
 
 
-_QUERY_CLEAN_RE = re.compile(
-    r"^(?:(?:search|find|retrieve|gather|look\s+up)\s+"
-    r"(?:(?:(?:the|all)\s+)?(?:database|web|graph|knowledge\s+base)\s+)?(?:for|about)\s+)",
-    re.IGNORECASE,
-)
+def _ensure_str_list(value: Any, *, fallback: List[str]) -> List[str]:
+    if isinstance(value, list):
+        result = [str(item).strip() for item in value if str(item).strip()]
+        return result or fallback
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return list(fallback)
 
-_LEADING_PHRASE_RE = re.compile(
-    r"^(?:(?:key\s+)?details\s+about|information\s+on|insights\s+into|overview\s+of|"
-    r"summary\s+of|guide\s+to|practical\s+guidance\s+on|strategies\s+for|"
-    r"(?:biographical|professional)\s+(?:and\s+)?(?:professional\s+)?(?:history|background)\s+of|"
-    r"(?:actionable|practical)\s+advice\s+on)\s+",
-    re.IGNORECASE,
-)
 
-_QUERY_REWRITE_PREFIX_RE = re.compile(
-    r"^(?:search|find|perform|conduct|collect|gather|query|look(?:\s+up)?|retrieve)\b",
-    re.IGNORECASE,
-)
+def _normalize_requirements(value: Any, problem_spec: str) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        value = []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        requirement_id = str(item.get("id") or f"req-{index + 1}").strip()
+        if not requirement_id:
+            requirement_id = f"req-{index + 1}"
+        question = str(item.get("question") or problem_spec).strip()
+        priority = item.get("priority")
+        try:
+            priority_value = int(priority)
+            if priority_value < 1:
+                priority_value = 1
+        except Exception:
+            priority_value = 1
+        quality_bar = str(
+            item.get("quality_bar") or "At least one high-quality, citable source."
+        ).strip()
+        stop_when = bool(item.get("stop_when_satisfied", True))
+        metadata = item.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        normalized.append(
+            {
+                "id": requirement_id,
+                "question": question,
+                "priority": priority_value,
+                "quality_bar": quality_bar,
+                "stop_when_satisfied": stop_when,
+                "metadata": metadata_dict,
+            }
+        )
+    if not normalized:
+        normalized.append(
+            {
+                "id": "req-1",
+                "question": problem_spec,
+                "priority": 1,
+                "quality_bar": "At least one high-quality, citable source.",
+                "stop_when_satisfied": True,
+                "metadata": {},
+            }
+        )
+    return normalized
+
+
+def _normalize_tasks(
+    value: Any,
+    requirement_ids: List[str],
+    problem_spec: str,
+) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        value = []
+    catalog = get_agent_catalog()
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        identifier = str(item.get("id") or f"task-{index + 1}").strip()
+        if not identifier:
+            identifier = f"task-{index + 1}"
+        requirement_id = str(
+            item.get("requirement_id") or requirement_ids[0]
+        ).strip()
+        if requirement_id not in requirement_ids:
+            requirement_id = requirement_ids[0]
+        description = str(
+            item.get("description")
+            or f"Investigate requirement {requirement_id}"
+        ).strip()
+        tool = str(item.get("tool") or "db_keyword").strip()
+        priority = item.get("priority")
+        try:
+            priority_value = int(priority)
+            if priority_value < 1:
+                priority_value = 1
+        except Exception:
+            priority_value = 1
+        descriptor = catalog.get(tool)
+        default_budget = (
+            descriptor.default_budget_tokens
+            if descriptor and descriptor.default_budget_tokens
+            else policies.DEFAULT_DB_BUDGET_TOKENS
+        )
+        default_timeout = (
+            descriptor.default_timeout_seconds
+            if descriptor and descriptor.default_timeout_seconds
+            else policies.DEFAULT_DB_TIMEOUT_SECONDS
+        )
+        budget_tokens = item.get("budget_tokens", default_budget)
+        timeout_seconds = item.get("timeout_seconds", default_timeout)
+        try:
+            budget_tokens = int(budget_tokens)
+        except Exception:
+            budget_tokens = default_budget
+        if budget_tokens <= 0:
+            budget_tokens = default_budget
+        try:
+            timeout_seconds = int(timeout_seconds)
+        except Exception:
+            timeout_seconds = default_timeout
+        if timeout_seconds <= 0:
+            timeout_seconds = default_timeout
+
+        requires_approval = bool(
+            item.get(
+                "requires_approval",
+                descriptor.requires_approval if descriptor else False,
+            )
+        )
+        inputs = _normalize_task_inputs(item.get("inputs"), description, problem_spec)
+        depends_on = _normalize_dependencies(item.get("depends_on"))
+        metadata = item.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+
+        normalized.append(
+            {
+                "id": identifier,
+                "requirement_id": requirement_id,
+                "description": description,
+                "tool": tool,
+                "priority": priority_value,
+                "budget_tokens": budget_tokens,
+                "timeout_seconds": timeout_seconds,
+                "requires_approval": requires_approval,
+                "inputs": inputs,
+                "depends_on": depends_on,
+                "metadata": metadata_dict,
+            }
+        )
+    if not normalized:
+        normalized.append(
+            {
+                "id": "task-1",
+                "requirement_id": requirement_ids[0],
+                "description": f"Search the knowledge base for: {problem_spec}",
+                "tool": "db_keyword",
+                "priority": 1,
+                "budget_tokens": policies.DEFAULT_DB_BUDGET_TOKENS,
+                "timeout_seconds": policies.DEFAULT_DB_TIMEOUT_SECONDS,
+                "requires_approval": False,
+                "inputs": {"query": problem_spec},
+                "depends_on": [],
+                "metadata": {},
+            }
+        )
+    return normalized
+
+
+def _normalize_findings(value: Any, requirement_ids: List[str]) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        finding_id = str(item.get("id") or f"finding-{index + 1}").strip()
+        if not finding_id:
+            finding_id = f"finding-{index + 1}"
+        requirement_id = item.get("requirement_id")
+        if requirement_id is not None:
+            requirement_id = str(requirement_id).strip()
+            if requirement_id and requirement_id not in requirement_ids:
+                requirement_id = requirement_ids[0]
+        key = str(item.get("key") or finding_id).strip()
+        value_text = str(item.get("value") or "").strip()
+        confidence = item.get("confidence", 0.5)
+        try:
+            confidence_value = float(confidence)
+        except Exception:
+            confidence_value = 0.5
+        confidence_value = max(0.0, min(1.0, confidence_value))
+        evidence_ids_raw = item.get("evidence_ids", [])
+        evidence_ids = [
+            str(eid).strip()
+            for eid in evidence_ids_raw
+            if isinstance(eid, (str, int)) and str(eid).strip()
+        ]
+        metadata = item.get("metadata")
+        metadata_dict = metadata if isinstance(metadata, dict) else {}
+        normalized.append(
+            {
+                "id": finding_id,
+                "requirement_id": requirement_id,
+                "key": key,
+                "value": value_text,
+                "confidence": confidence_value,
+                "evidence_ids": evidence_ids,
+                "metadata": metadata_dict,
+            }
+        )
+    return normalized
+
+
+def _normalize_open_questions(value: Any, requirement_ids: List[str]) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        if not question:
+            continue
+        reason = str(item.get("reason") or "").strip()
+        requirement_id_raw = item.get("requirement_id")
+        requirement_id: str | None
+        if requirement_id_raw is None:
+            requirement_id = None
+        else:
+            requirement_id = str(requirement_id_raw).strip() or None
+            if requirement_id and requirement_id not in requirement_ids:
+                requirement_id = requirement_ids[0]
+        suggested = item.get("suggested_tasks", [])
+        if isinstance(suggested, list):
+            suggested_tasks = [
+                str(task).strip()
+                for task in suggested
+                if isinstance(task, (str, int)) and str(task).strip()
+            ]
+        else:
+            suggested_tasks = [str(suggested).strip()] if suggested else []
+        normalized.append(
+            {
+                "question": question,
+                "reason": reason,
+                "requirement_id": requirement_id,
+                "suggested_tasks": suggested_tasks,
+            }
+        )
+    return normalized
+
+
+def _normalize_task_inputs(
+    value: Any,
+    description: str,
+    problem_spec: str,
+) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    safe: Dict[str, Any] = {}
+    for key, val in value.items():
+        safe[str(key)] = val
+    if "query" not in safe or not isinstance(safe["query"], str) or not safe["query"].strip():
+        suggested = _suggest_query(description, context=problem_spec)
+        if suggested:
+            safe["query"] = suggested
+    else:
+        candidate = safe["query"].strip()
+        if _needs_query_refinement(candidate):
+            suggested = _suggest_query(description, context=problem_spec)
+            if suggested:
+                safe["query"] = suggested
+    return safe
+
+
+def _normalize_dependencies(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return [cleaned] if cleaned else []
+    if isinstance(value, list):
+        result = []
+        for dep in value:
+            cleaned = str(dep).strip()
+            if cleaned:
+                result.append(cleaned)
+        return result
+    return []
+
+
+def _load_prompt(filename: str) -> str:
+    cached = _PROMPT_CACHE.get(filename)
+    if cached is not None:
+        return cached
+    path = _PROMPT_DIR / filename
+    text = path.read_text(encoding="utf-8").strip()
+    _PROMPT_CACHE[filename] = text
+    return text
 
 
 def _needs_query_refinement(query: str) -> bool:
@@ -381,4 +678,24 @@ def _suggest_query(description: str, *, context: str | None = None) -> str:
     return cleaned.strip()
 
 
-__all__ = ["plan_from_message"]
+_QUERY_CLEAN_RE = re.compile(
+    r"^(?:(?:search|find|retrieve|gather|look\s+up)\s+"
+    r"(?:(?:(?:the|all)\s+)?(?:database|web|graph|knowledge\s+base)\s+)?(?:for|about)\s+)",
+    re.IGNORECASE,
+)
+
+_LEADING_PHRASE_RE = re.compile(
+    r"^(?:(?:key\s+)?details\s+about|information\s+on|insights\s+into|overview\s+of|"
+    r"summary\s+of|guide\s+to|practical\s+guidance\s+on|strategies\s+for|"
+    r"(?:biographical|professional)\s+(?:and\s+)?(?:professional\s+)?(?:history|background)\s+of|"
+    r"(?:actionable|practical)\s+advice\s+on)\s+",
+    re.IGNORECASE,
+)
+
+_QUERY_REWRITE_PREFIX_RE = re.compile(
+    r"^(?:search|find|perform|conduct|collect|gather|query|look(?:\s+up)?|retrieve)\b",
+    re.IGNORECASE,
+)
+
+
+__all__ = ["plan_from_message", "revise_plan_with_evidence"]

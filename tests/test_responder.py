@@ -3,7 +3,7 @@
 import json
 
 from src.my_agentic_chatbot.response.responder import Responder
-from src.my_agentic_chatbot.schemas import EvidenceItem, EvidencePack
+from src.my_agentic_chatbot.schemas import EvidenceItem, EvidencePack, Finding
 
 
 class StubResponderClient:
@@ -29,7 +29,33 @@ def test_responder_includes_citations() -> None:
         "unresolved_questions": [],
     }
     responder = Responder(client=StubResponderClient(payload))
-    response = responder.respond("Summarize policies", pack)
+    findings = [
+        Finding(
+            id="finding-1",
+            requirement_id="req-1",
+            key="Policies summary",
+            value="Snippet about policies.",
+            confidence=0.8,
+            evidence_ids=["db-1"],
+            metadata={},
+        ),
+        Finding(
+            id="finding-2",
+            requirement_id="req-1",
+            key="Policies summary",
+            value="Another snippet.",
+            confidence=0.7,
+            evidence_ids=["db-2"],
+            metadata={},
+        ),
+    ]
+    response = responder.respond(
+        "Summarize policies",
+        pack,
+        findings=findings,
+        acceptance_criteria=["Summarize policies"],
+        open_questions=[],
+    )
     assert response.citations == ["db-1", "db-2"]
     assert response.answer.startswith("Policies summary")
     assert response.confidence == 0.7

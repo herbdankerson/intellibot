@@ -7,8 +7,10 @@ from src.my_agentic_chatbot.tools.mcp_tools import MCPJsonTool, SequentialThinki
 def _make_task(tool: str, description: str, inputs: dict | None = None) -> PlanTask:
     return PlanTask(
         id="task-1",
+        requirement_id="req-1",
         description=description,
         tool=tool,
+        priority=1,
         budget_tokens=100,
         timeout_seconds=5,
         requires_approval=False,

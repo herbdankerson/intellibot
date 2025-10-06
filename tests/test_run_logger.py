@@ -3,19 +3,44 @@
 from datetime import datetime
 
 from src.my_agentic_chatbot.run_logging import AgentRunLogger
-from src.my_agentic_chatbot.schemas import AgentResponse, EvidenceItem, EvidencePack, Plan, PlanTask
+from src.my_agentic_chatbot.schemas import (
+    AgentResponse,
+    EvidenceItem,
+    EvidencePack,
+    Plan,
+    PlanTask,
+    Requirement,
+)
 from src.my_agentic_chatbot.workflows import policies
 
 
 def _sample_plan() -> Plan:
+    requirement = Requirement(
+        id="req-1",
+        question="Fetch data",
+        priority=1,
+        quality_bar="At least one snippet",
+        stop_when_satisfied=True,
+        metadata={},
+    )
     task = PlanTask(
         id="db-1",
+        requirement_id=requirement.id,
         description="Fetch data",
         tool="db_search",
+        priority=1,
         budget_tokens=policies.DEFAULT_DB_BUDGET_TOKENS,
         timeout_seconds=policies.DEFAULT_DB_TIMEOUT_SECONDS,
     )
-    return Plan(goals=["Demo"], tasks=[task])
+    return Plan(
+        problem_spec="Demo",
+        acceptance_criteria=["Answer cites evidence."],
+        requirements=[requirement],
+        tasks=[task],
+        findings=[],
+        open_questions=[],
+        stop_conditions=["Acceptance criteria met"],
+    )
 
 
 def _sample_evidence() -> EvidencePack:

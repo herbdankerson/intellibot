@@ -7,12 +7,12 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence
 
 from ..agents import AgentConfig, get_agent_config
 from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
-from ..schemas import AgentResponse, EvidenceItem, EvidencePack
+from ..schemas import AgentResponse, EvidenceItem, EvidencePack, Finding, OpenQuestion
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,15 @@ class Responder:
         if self.client is None:
             self.client = LLMClient(model_name=target_model)
 
-    def respond(self, message: str, evidence_pack: EvidencePack) -> AgentResponse:
+    def respond(
+        self,
+        message: str,
+        evidence_pack: EvidencePack,
+        *,
+        findings: Sequence[Finding],
+        acceptance_criteria: Sequence[str],
+        open_questions: Sequence[OpenQuestion] | None = None,
+    ) -> AgentResponse:
         """Return the final response payload for the caller."""
 
         agent_config = self.agent_config or get_agent_config("responder")
@@ -55,7 +63,13 @@ class Responder:
             responder_client = LLMClient(model_name=target_model)
 
         try:
-            messages = _build_messages(message, evidence_pack)
+            messages = _build_messages(
+                message,
+                evidence_pack,
+                findings,
+                acceptance_criteria,
+                open_questions or [],
+            )
             if isinstance(responder_client, LLMClient):
                 response_text = responder_client.chat(
                     messages,
@@ -71,22 +85,47 @@ class Responder:
         return AgentResponse.model_validate(payload)
 
 
-def _build_messages(question: str, pack: EvidencePack) -> Iterable[LLMMessage]:
+def _build_messages(
+    question: str,
+    pack: EvidencePack,
+    findings: Sequence[Finding],
+    acceptance: Sequence[str],
+    open_questions: Sequence[OpenQuestion],
+) -> Iterable[LLMMessage]:
     system_prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
     evidence_lines = _render_evidence(pack.items)
-    evidence_summary = pack.summary.strip()
-    user_parts = [f"User question: {question}"]
-    if evidence_summary:
-        user_parts.append(f"Evidence summary: {evidence_summary}")
-    user_parts.append("Evidence items:")
-    user_parts.extend(evidence_lines or ["(no evidence collected)"])
+    finding_lines = _render_findings(findings)
+    acceptance_lines = [f"- {item}" for item in acceptance] if acceptance else []
+    open_question_lines = _render_open_questions(open_questions)
+
     instructions = (
+        "Respond ONLY with claims supported by the provided findings. "
+        "Every sentence containing a claim must cite one or more evidence IDs. "
+        "If acceptance criteria cannot be satisfied, explain the gap and recommend next steps."
+    )
+
+    user_sections: List[str] = [f"User question: {question}"]
+    if acceptance_lines:
+        user_sections.append("Acceptance criteria:\n" + "\n".join(acceptance_lines))
+    if finding_lines:
+        user_sections.append("Findings (must be respected):\n" + "\n".join(finding_lines))
+    else:
+        user_sections.append("Findings: none (answer cautiously)")
+    if open_question_lines:
+        user_sections.append("Outstanding gaps to address if possible:\n" + "\n".join(open_question_lines))
+    evidence_summary = pack.summary.strip()
+    if evidence_summary:
+        user_sections.append(f"Evidence summary: {evidence_summary}")
+    user_sections.append("Evidence items:")
+    user_sections.extend(evidence_lines or ["(no evidence collected)"])
+    user_sections.append(
         "Return a JSON object with keys answer (string), citations (list[str]), "
         "confidence (float between 0 and 1), unresolved_questions (list[str])."
     )
+
     return [
         LLMMessage(role="system", content=f"{system_prompt}\n{instructions}"),
-        LLMMessage(role="user", content="\n".join(user_parts)),
+        LLMMessage(role="user", content="\n\n".join(user_sections)),
     ]
 
 
@@ -103,6 +142,26 @@ def _render_evidence(items: Iterable[EvidenceItem]) -> List[str]:
             )
         meta_text = f" ({'; '.join(metadata)})" if metadata else ""
         lines.append(f"- {item.id}: {snippet}{meta_text}")
+    return lines
+
+
+def _render_findings(findings: Sequence[Finding]) -> List[str]:
+    lines: List[str] = []
+    for finding in findings:
+        evidence_refs = ", ".join(finding.evidence_ids) if finding.evidence_ids else ""
+        meta = f" [confidence={finding.confidence:.2f}]"
+        if evidence_refs:
+            meta += f" (evidence: {evidence_refs})"
+        lines.append(f"- {finding.id}: {finding.value}{meta}")
+    return lines
+
+
+def _render_open_questions(questions: Sequence[OpenQuestion]) -> List[str]:
+    lines: List[str] = []
+    for item in questions:
+        reason = f" — {item.reason}" if item.reason else ""
+        requirement = f" [requirement={item.requirement_id}]" if item.requirement_id else ""
+        lines.append(f"- {item.question}{reason}{requirement}")
     return lines
 
 
@@ -137,11 +196,20 @@ def _parse_responder_payload(response: str, pack: EvidencePack) -> Dict[str, Any
             "confidence": 0.2,
             "unresolved_questions": ["Structured response malformed."],
         }
+    valid_ids = set(pack.citation_order())
     parsed.setdefault("citations", pack.citation_order())
     parsed.setdefault("confidence", 0.5)
     parsed.setdefault("unresolved_questions", [])
     if not isinstance(parsed.get("citations", []), list):
         parsed["citations"] = pack.citation_order()
+    else:
+        parsed["citations"] = [
+            citation
+            for citation in parsed["citations"]
+            if isinstance(citation, str) and citation in valid_ids
+        ]
+        if not parsed["citations"] and valid_ids:
+            parsed["citations"] = list(valid_ids)
     return parsed
 
 
