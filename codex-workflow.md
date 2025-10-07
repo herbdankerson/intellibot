@@ -17,7 +17,7 @@ Here’s a streamlined, repeatable playbook.
   * `instructions.md` (you already have it): definitive spec the Codex Web agent reads to plan.
   * `ops/litellm/config.yaml`, `ops/mcp/servers.yaml`, `src/.../schemas.py`, `storage/models.sql`: contracts.
   * `/.github/ISSUE_TEMPLATE/*.yml` and `/.github/PULL_REQUEST_TEMPLATE.md`: prompts/forms for Codex to use.
-  * `/docs/adr/` (Architecture Decision Records): short “why” notes when choices change.
+  * `/project-docs/adr/` (Architecture Decision Records): short “why” notes when choices change.
 
 # 2) Roles for the two Codex surfaces
 
@@ -92,7 +92,7 @@ Codex Web then reviews, requests edits, or merges.
 
 Use labels to branch behavior in CI:
 
-* `codex:plan` → run **docs/prompt validation** only.
+* `codex:plan` → run **project-docs/prompt validation** only.
 * `codex:generate` → run **full test matrix**, linters, type checks.
 * `codex:infra` → validate YAML/JSON schemas (`ops/litellm/config.yaml`, `ops/mcp/servers.yaml`).
 * `safe-to-merge` → auto-merge if CI green.
@@ -148,7 +148,7 @@ Codex CLI runs pre-commit before committing to avoid noisy CI fails.
 
   * `ops/litellm/config.yaml` → add `x-version: "2025-09-23"` and a comment block of changes.
   * `ops/mcp/servers.yaml` → same.
-* Maintain **ADR notes** in `/docs/adr/NNN-title.md` (one paragraph each: context, decision, consequences).
+* Maintain **ADR notes** in `/project-docs/adr/NNN-title.md` (one paragraph each: context, decision, consequences).
 
 # 9) Environment & secrets
 

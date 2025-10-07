@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Dict, Iterable, List, Optional, Tuple
 from uuid import UUID, uuid4
 
@@ -23,6 +24,8 @@ from etl.tasks.model_clients import (
 )
 
 from ..storage.db import get_engine
+
+LOGGER = logging.getLogger(__name__)
 
 
 def ingest_web_capture(
@@ -152,7 +155,20 @@ def ingest_web_capture(
 
     embeddings: List[ChunkEmbedding] = []
     if chunk_texts:
-        general_vectors = embed_with_gemini(chunk_texts)
+        general_vectors: List[List[float]] = []
+        try:
+            general_vectors = embed_with_gemini(chunk_texts)
+        except Exception as exc:  # pragma: no cover - depends on external quota
+            LOGGER.warning(
+                "Falling back to empty general embeddings",
+                extra={
+                    "ingest_item": str(item.id),
+                    "run_id": run_id,
+                    "error": str(exc),
+                },
+            )
+            general_vectors = []
+
         for vector, chunk in zip(general_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
@@ -162,9 +178,21 @@ def ingest_web_capture(
                     vector=vector,
                 )
             )
+
         domain_key = (item.domain or domain or "web").lower()
         if domain_key == "legal":
-            voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-law-2")
+            try:
+                voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-law-2")
+            except Exception as exc:  # pragma: no cover - external quota / network
+                LOGGER.warning(
+                    "Voyage legal embeddings unavailable",
+                    extra={
+                        "ingest_item": str(item.id),
+                        "run_id": run_id,
+                        "error": str(exc),
+                    },
+                )
+                voyage_vectors = []
             for vector, chunk in zip(voyage_vectors, chunks):
                 embeddings.append(
                     ChunkEmbedding(
@@ -175,7 +203,18 @@ def ingest_web_capture(
                     )
                 )
         elif domain_key == "code":
-            voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-code-3")
+            try:
+                voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-code-3")
+            except Exception as exc:  # pragma: no cover - external quota / network
+                LOGGER.warning(
+                    "Voyage code embeddings unavailable",
+                    extra={
+                        "ingest_item": str(item.id),
+                        "run_id": run_id,
+                        "error": str(exc),
+                    },
+                )
+                voyage_vectors = []
             for vector, chunk in zip(voyage_vectors, chunks):
                 embeddings.append(
                     ChunkEmbedding(

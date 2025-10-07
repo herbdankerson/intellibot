@@ -387,11 +387,13 @@ class ExecuteTasks(Executor):
         tools: ToolSuite,
         approver: Approver,
         selector_id: str,
+        curate_id: str,
     ) -> None:
         super().__init__(id="execute_tasks")
         self._tools = tools
         self._approver = approver
         self._selector_id = selector_id
+        self._curate_id = curate_id
 
     @handler
     async def run_tasks(self, state: PlanLoopState, ctx: WorkflowContext) -> None:
@@ -409,8 +411,13 @@ class ExecuteTasks(Executor):
             )
         ]
         if not ready_tasks:
-            state.needs_revision = True
-            state.notes.append("No ready tasks for unsatisfied requirements; requesting revision")
+            if target_requirements:
+                state.needs_revision = True
+                state.notes.append(
+                    "No ready tasks for unsatisfied requirements; requesting revision"
+                )
+            else:
+                state.needs_revision = False
             await ctx.send_message(state, target_id=self._selector_id)
             return
 
@@ -493,7 +500,7 @@ class ExecuteTasks(Executor):
                     outputs=outcome.evidence,
                     findings=outcome.findings,
                 )
-        await ctx.send_message(state)
+        await ctx.send_message(state, target_id=self._curate_id)
 
     def _run_task(
         self, state: PlanLoopState, task: PlanTask, requirement: Requirement
@@ -543,10 +550,17 @@ class ExecuteTasks(Executor):
 class CurateEvidence(Executor):
     """Deduplicate evidence, enforce budgets, and run evidence approval gate."""
 
-    def __init__(self, *, approver: Approver, selector_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        approver: Approver,
+        selector_id: str,
+        evaluate_id: str,
+    ) -> None:
         super().__init__(id="curate_evidence")
         self._approver = approver
         self._selector_id = selector_id
+        self._evaluate_id = evaluate_id
 
     @handler
     async def curate(self, state: PlanLoopState, ctx: WorkflowContext) -> None:
@@ -555,7 +569,7 @@ class CurateEvidence(Executor):
             return
         if not state.evidence:
             state.notes.append("No evidence collected during iteration")
-            await ctx.send_message(state, target_id=self._selector_id)
+            await ctx.send_message(state, target_id=self._evaluate_id)
             return
         state.evidence_pack = assemble_evidence(state.evidence)
         if state.run_logger is not None:
@@ -577,7 +591,9 @@ class CurateEvidence(Executor):
                     message=state.termination_reason,
                 )
             )
-        await ctx.send_message(state, target_id=self._selector_id)
+            await ctx.send_message(state, target_id=self._selector_id)
+            return
+        await ctx.send_message(state, target_id=self._evaluate_id)
 
 
 class EvaluateGaps(Executor):
@@ -765,21 +781,23 @@ class Respond(Executor):
                 status="approved" if approval.approved else "rejected",
             )
         if not approval.approved:
+            reason = approval.reason or "Response rejected"
             state.report.record(
                 ExecutionEvent(
                     task_id="final_response",
                     status=TaskStatus.FAILED,
-                    message=approval.reason or "Response rejected",
+                    message=reason,
                 )
             )
+            state.report.notes.append(f"Response rejected: {reason}")
             state.response = AgentResponse(
                 answer="Final response requires revision before delivery.",
                 citations=[],
                 confidence=0.0,
-                unresolved_questions=[approval.reason or "Manual review required."],
+                unresolved_questions=[reason or "Manual review required."],
             )
             state.terminated = True
-            state.termination_reason = approval.reason or "Response rejected"
+            state.termination_reason = reason
             await ctx.send_message(state, target_id=self._finalize_id)
             return
 
@@ -795,15 +813,28 @@ class Respond(Executor):
             if state.run_logger is not None:
                 state.run_logger.log_audit(audit_report)
             if not audit_report.passed:
+                fail_summary = audit_report.summary or "Audit failed"
                 state.report.record(
                     ExecutionEvent(
                         task_id="audit_gate",
                         status=TaskStatus.FAILED,
-                        message=audit_report.summary or "Audit failed",
+                        message=fail_summary,
                     )
                 )
+                state.report.notes.append(f"Audit failed: {fail_summary}")
+                flagged_response = AgentResponse(
+                    answer=f"Audit failed: flagged for review. {fail_summary}",
+                    citations=response.citations,
+                    confidence=min(response.confidence, 0.3),
+                    unresolved_questions=response.unresolved_questions + [fail_summary],
+                )
+                state.response = flagged_response
                 state.terminated = True
-                state.termination_reason = audit_report.summary or "Audit failed"
+                state.termination_reason = fail_summary
+                state.evidence_pack = evidence_pack
+                state.audit_report = audit_report
+                await ctx.send_message(state, target_id=self._finalize_id)
+                return
 
         state.response = response
         state.evidence_pack = evidence_pack
@@ -955,13 +986,18 @@ class WorkflowOrchestrator:
             respond_id="respond",
             finalize_id="finalize",
         )
+        evaluate = EvaluateGaps(selector_id=selector.id)
+        curate = CurateEvidence(
+            approver=self.approver,
+            selector_id=selector.id,
+            evaluate_id=evaluate.id,
+        )
         execute = ExecuteTasks(
             tools=self.tools,
             approver=self.approver,
             selector_id=selector.id,
+            curate_id=curate.id,
         )
-        curate = CurateEvidence(approver=self.approver, selector_id=selector.id)
-        evaluate = EvaluateGaps(selector_id=selector.id)
         revise = RevisePlan(selector_id=selector.id)
         respond = Respond(
             responder=self.responder,

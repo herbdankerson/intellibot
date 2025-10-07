@@ -1,6 +1,7 @@
 """Tests for the workflow orchestrator."""
 
 import json
+from unittest.mock import patch
 
 from src.my_agentic_chatbot.schemas import (
     AgentResponse,
@@ -117,8 +118,18 @@ def build_plan() -> Plan:
 
 def test_orchestrator_executes_plan() -> None:
     evidence = [
-        EvidenceItem(id="db-1", source="db", content="Snippet", score=1.0),
-        EvidenceItem(id="db-2", source="db", content="Snippet 2", score=0.5),
+        EvidenceItem(
+            id="db-1",
+            source="https://example.com/source-1",
+            content="Snippet",
+            score=1.0,
+        ),
+        EvidenceItem(
+            id="db-2",
+            source="https://example.net/source-2",
+            content="Snippet 2",
+            score=0.5,
+        ),
     ]
     orchestrator = WorkflowOrchestrator(
         db_tool=StubDatabaseTool(evidence),
@@ -126,7 +137,11 @@ def test_orchestrator_executes_plan() -> None:
         audit_agent=StubAuditAgent(),
     )
     plan = build_plan()
-    result = orchestrator.execute_plan(plan)
+    with patch(
+        "src.my_agentic_chatbot.planner.main_planner.revise_plan_with_evidence",
+        side_effect=lambda plan, **_: plan,
+    ):
+        result = orchestrator.execute_plan(plan)
     assert result.evidence.items, "Orchestrator should collect evidence"
     assert result.report.events, "Execution report should track events"
     assert result.report.successful is True
@@ -137,13 +152,30 @@ def test_orchestrator_executes_plan() -> None:
 def test_run_pipeline_rejects_final_response() -> None:
     orchestrator = WorkflowOrchestrator(
         db_tool=StubDatabaseTool(
-            [EvidenceItem(id="db-1", source="db", content="Snippet", score=1.0)]
+            [
+                EvidenceItem(
+                    id="db-1",
+                    source="https://example.com/source-1",
+                    content="Snippet",
+                    score=1.0,
+                ),
+                EvidenceItem(
+                    id="db-2",
+                    source="https://example.net/source-2",
+                    content="Snippet 2",
+                    score=0.6,
+                ),
+            ]
         ),
         responder=Responder(client=StubResponderClient()),
         approver=RejectingApprover(),
         audit_agent=StubAuditAgent(),
     )
-    response, result = orchestrator.run_pipeline("hello", build_plan())
+    with patch(
+        "src.my_agentic_chatbot.planner.main_planner.revise_plan_with_evidence",
+        side_effect=lambda plan, **_: plan,
+    ):
+        response, result = orchestrator.run_pipeline("hello", build_plan())
 
     assert result.report.successful is False
     assert any(
@@ -159,16 +191,43 @@ class StubAgentRunner:
     def __init__(self) -> None:
         self.calls: list[PlanTask] = []
 
-    def execute(self, task: PlanTask):
+    def execute(self, task: PlanTask, requirement: Requirement) -> ToolOutcome:
         self.calls.append(task)
-        return [
+        evidence = [
             EvidenceItem(
                 id="agent-1",
-                source="agent:stub",
+                source="agent:stub:1",
                 content="Agent produced evidence",
                 score=0.8,
-            )
+            ),
+            EvidenceItem(
+                id="agent-2",
+                source="agent:stub:2",
+                content="Agent produced more evidence",
+                score=0.75,
+            ),
         ]
+        findings = [
+            Finding(
+                id="agent-finding-1",
+                requirement_id=requirement.id,
+                key=requirement.question,
+                value=evidence[0].content,
+                confidence=0.8,
+                evidence_ids=[evidence[0].id],
+                metadata={"source": evidence[0].source},
+            ),
+            Finding(
+                id="agent-finding-2",
+                requirement_id=requirement.id,
+                key=requirement.question,
+                value=evidence[1].content,
+                confidence=0.75,
+                evidence_ids=[evidence[1].id],
+                metadata={"source": evidence[1].source},
+            ),
+        ]
+        return ToolOutcome(evidence=evidence, findings=findings)
 
 
 def test_orchestrator_executes_custom_agent() -> None:
@@ -207,20 +266,41 @@ def test_orchestrator_executes_custom_agent() -> None:
         open_questions=[],
         stop_conditions=["Acceptance criteria met"],
     )
-    result = orchestrator.execute_plan(plan)
+    with patch(
+        "src.my_agentic_chatbot.planner.main_planner.revise_plan_with_evidence",
+        side_effect=lambda plan, **_: plan,
+    ):
+        result = orchestrator.execute_plan(plan)
     assert custom_runner.calls, "Custom agent should have been executed"
-    assert any(item.source == "agent:stub" for item in result.evidence.items)
+    assert any(item.source.startswith("agent:stub") for item in result.evidence.items)
 
 
 def test_run_pipeline_blocks_on_audit_failure() -> None:
     orchestrator = WorkflowOrchestrator(
         db_tool=StubDatabaseTool(
-            [EvidenceItem(id="db-1", source="db", content="Snippet", score=1.0)]
+            [
+                EvidenceItem(
+                    id="db-1",
+                    source="https://example.com/source-1",
+                    content="Snippet",
+                    score=1.0,
+                ),
+                EvidenceItem(
+                    id="db-2",
+                    source="https://example.net/source-2",
+                    content="Snippet 2",
+                    score=0.8,
+                ),
+            ]
         ),
         responder=Responder(client=StubResponderClient()),
         audit_agent=StubAuditAgent(passed=False),
     )
-    response, result = orchestrator.run_pipeline("hello", build_plan())
+    with patch(
+        "src.my_agentic_chatbot.planner.main_planner.revise_plan_with_evidence",
+        side_effect=lambda plan, **_: plan,
+    ):
+        response, result = orchestrator.run_pipeline("hello", build_plan())
 
     assert result.report.successful is False
     assert any(
@@ -228,6 +308,6 @@ def test_run_pipeline_blocks_on_audit_failure() -> None:
         for event in result.report.events
     )
     answer_lower = response.answer.lower()
-    assert "audit pass" in answer_lower and "flagged" in answer_lower
+    assert "audit failed" in answer_lower and "flagged" in answer_lower
     assert result.audit_report is not None
     assert result.audit_report.passed is False
