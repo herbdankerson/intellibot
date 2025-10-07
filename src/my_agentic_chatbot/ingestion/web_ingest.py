@@ -17,8 +17,12 @@ from etl.tasks.intake_tasks import (
     persist_results,
 )
 from etl.tasks.model_clients import (
-    embed_with_gemini,
-    embed_with_voyage,
+    CODE_EMBED_MODEL,
+    GENERAL_EMBED_MODEL,
+    LEGAL_EMBED_MODEL,
+    embed_with_code,
+    embed_with_general,
+    embed_with_legal,
     summarize_chunks_with_gemini,
     summarize_with_gemini,
 )
@@ -157,7 +161,7 @@ def ingest_web_capture(
     if chunk_texts:
         general_vectors: List[List[float]] = []
         try:
-            general_vectors = embed_with_gemini(chunk_texts)
+            general_vectors = embed_with_general(chunk_texts)
         except Exception as exc:  # pragma: no cover - depends on external quota
             LOGGER.warning(
                 "Falling back to empty general embeddings",
@@ -173,8 +177,8 @@ def ingest_web_capture(
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="general",
-                    model="gemini/embedding-001",
+                    space="emb-general",
+                    model=GENERAL_EMBED_MODEL,
                     vector=vector,
                 )
             )
@@ -182,45 +186,45 @@ def ingest_web_capture(
         domain_key = (item.domain or domain or "web").lower()
         if domain_key == "legal":
             try:
-                voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-law-2")
-            except Exception as exc:  # pragma: no cover - external quota / network
+                legal_vectors = embed_with_legal(chunk_texts)
+            except Exception as exc:  # pragma: no cover - runtime availability
                 LOGGER.warning(
-                    "Voyage legal embeddings unavailable",
+                    "Legal embedding backend unavailable",
                     extra={
                         "ingest_item": str(item.id),
                         "run_id": run_id,
                         "error": str(exc),
                     },
                 )
-                voyage_vectors = []
-            for vector, chunk in zip(voyage_vectors, chunks):
+                legal_vectors = []
+            for vector, chunk in zip(legal_vectors, chunks):
                 embeddings.append(
                     ChunkEmbedding(
                         chunk_id=chunk.id,
-                        space="legal",
-                        model="voyage-law-2",
+                        space="emb-law",
+                        model=LEGAL_EMBED_MODEL,
                         vector=vector,
                     )
                 )
         elif domain_key == "code":
             try:
-                voyage_vectors = embed_with_voyage(chunk_texts, model="voyage-code-3")
-            except Exception as exc:  # pragma: no cover - external quota / network
+                code_vectors = embed_with_code(chunk_texts)
+            except Exception as exc:  # pragma: no cover - runtime availability
                 LOGGER.warning(
-                    "Voyage code embeddings unavailable",
+                    "Code embedding backend unavailable",
                     extra={
                         "ingest_item": str(item.id),
                         "run_id": run_id,
                         "error": str(exc),
                     },
                 )
-                voyage_vectors = []
-            for vector, chunk in zip(voyage_vectors, chunks):
+                code_vectors = []
+            for vector, chunk in zip(code_vectors, chunks):
                 embeddings.append(
                     ChunkEmbedding(
                         chunk_id=chunk.id,
-                        space="code",
-                        model="voyage-code-3",
+                        space="emb-code",
+                        model=CODE_EMBED_MODEL,
                         vector=vector,
                     )
                 )

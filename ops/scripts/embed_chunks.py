@@ -15,24 +15,54 @@ sys.path.append(str(BASE_DIR))
 from src.my_agentic_chatbot.config import get_settings
 from src.my_agentic_chatbot.storage.db import get_engine
 
-EMBEDDING_SPACES = ("emb-general", "emb-code", "emb-law")
+SPACE_CONFIG: dict[str, dict[str, Any]] = {
+    "emb-general": {
+        "model": "thenlper/gte-large",
+        "provider": "local-tei",
+        "dims": 1024,
+        "distance_metric": "cosine",
+    },
+    "emb-law": {
+        "model": "nlpaueb/legal-bert-base-uncased",
+        "provider": "local-tei",
+        "dims": 768,
+        "distance_metric": "cosine",
+    },
+    "emb-code": {
+        "model": "gemini/embedding-001",
+        "provider": "google-gemini",
+        "dims": 768,
+        "distance_metric": "cosine",
+    },
+}
+
+EMBEDDING_SPACES = tuple(SPACE_CONFIG.keys())
 
 
 def ensure_space(space_name: str) -> int:
+    config = SPACE_CONFIG[space_name]
     engine = get_engine()
     with engine.begin() as connection:
         result = connection.execute(
             text(
                 """
-                INSERT INTO kb_embedding_spaces (name, model, is_current)
-                VALUES (:name, :model, TRUE)
+                INSERT INTO kb.embedding_spaces (name, model, provider, dims, distance_metric)
+                VALUES (:name, :model, :provider, :dims, :distance_metric)
                 ON CONFLICT (name) DO UPDATE
                 SET model = EXCLUDED.model,
-                    is_current = TRUE
+                    provider = EXCLUDED.provider,
+                    dims = EXCLUDED.dims,
+                    distance_metric = EXCLUDED.distance_metric
                 RETURNING id
                 """
             ),
-            {"name": space_name, "model": space_name},
+            {
+                "name": space_name,
+                "model": config["model"],
+                "provider": config["provider"],
+                "dims": config["dims"],
+                "distance_metric": config["distance_metric"],
+            },
         )
         return result.scalar_one()
 
@@ -43,13 +73,13 @@ def fetch_pending_chunks(space_id: int, limit: int) -> List[dict[str, Any]]:
         result = connection.execute(
             text(
                 """
-                SELECT c.id AS chunk_id, c.document_id, c.content
-                FROM kb_chunks c
+                SELECT c.id AS chunk_id, c.text
+                FROM kb.chunks c
                 WHERE NOT EXISTS (
-                    SELECT 1 FROM kb_embeddings e
-                    WHERE e.chunk_id = c.id AND e.space_id = :space_id AND e.level = 'chunk'
+                    SELECT 1 FROM kb.chunk_embeddings e
+                    WHERE e.chunk_id = c.id AND e.space_id = :space_id
                 )
-                ORDER BY c.id
+                ORDER BY c.created_at
                 LIMIT :limit
                 """
             ),
@@ -77,13 +107,15 @@ def insert_embeddings(space_id: int, rows: List[dict[str, Any]], vectors: List[L
             connection.execute(
                 text(
                     """
-                    INSERT INTO kb_embeddings (chunk_id, document_id, space_id, level, embedding)
-                    VALUES (:chunk_id, :document_id, :space_id, 'chunk', :embedding::vector)
+                    INSERT INTO kb.chunk_embeddings (chunk_id, space_id, embedding)
+                    VALUES (:chunk_id, :space_id, CAST(:embedding AS vector))
+                    ON CONFLICT (chunk_id, space_id) DO UPDATE
+                    SET embedding = EXCLUDED.embedding,
+                        created_at = NOW()
                     """
                 ),
                 {
                     "chunk_id": row["chunk_id"],
-                    "document_id": row["document_id"],
                     "space_id": space_id,
                     "embedding": to_vector_literal(vector),
                 },
@@ -108,7 +140,7 @@ def main() -> None:
             rows = fetch_pending_chunks(space_id, args.batch_size)
             if not rows:
                 break
-            vectors = embed_texts(client, args.space, [row["content"] for row in rows])
+            vectors = embed_texts(client, args.space, [row["text"] for row in rows])
             if len(vectors) != len(rows):
                 raise RuntimeError("Embedding response count does not match request")
             insert_embeddings(space_id, rows, vectors)

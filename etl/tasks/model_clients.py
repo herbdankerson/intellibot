@@ -21,13 +21,14 @@ LOGGER = logging.getLogger(__name__)
 
 SUMMARIZER_MODEL = "cheap-worker"
 CLASSIFIER_MODEL = "cheap-worker"
-GEMINI_EMBED_MODEL = "gemini/embedding-001"
-VOYAGE_LAW_MODEL = "voyage-law-2"
-VOYAGE_CODE_MODEL = "voyage-code-3"
+GENERAL_EMBED_MODEL = "emb-general"
+LEGAL_EMBED_MODEL = "emb-law"
+CODE_EMBED_MODEL = "emb-code"
 
 GEMINI_SUMMARY_BATCH = 8
-GEMINI_EMBED_BATCH = 8
-VOYAGE_EMBED_BATCH = 16
+GENERAL_EMBED_BATCH = 32
+LEGAL_EMBED_BATCH = 32
+CODE_EMBED_BATCH = 16
 DEFAULT_RETRIES = 3
 
 
@@ -266,16 +267,39 @@ def classify_domain(text: str) -> ClassificationResult:
     return ClassificationResult(domain=domain, confidence=confidence, source_labels=source_labels)
 
 
-def embed_with_gemini(texts: Sequence[str]) -> List[List[float]]:
-    """Create embeddings with Gemini `embedding-001` via LiteLLM."""
+def embed_with_general(texts: Sequence[str]) -> List[List[float]]:
+    """Create embeddings for general content using the local TEI backend."""
 
-    return _batched_embedding_request(texts, GEMINI_EMBED_MODEL, GEMINI_EMBED_BATCH)
+    return _batched_embedding_request(texts, GENERAL_EMBED_MODEL, GENERAL_EMBED_BATCH)
 
 
-def embed_with_voyage(texts: Sequence[str], *, model: str) -> List[List[float]]:
-    """Create embeddings using Voyage models via LiteLLM."""
+def embed_with_legal(texts: Sequence[str]) -> List[List[float]]:
+    """Create embeddings for legal content using the local TEI backend."""
 
-    return _batched_embedding_request(texts, model, VOYAGE_EMBED_BATCH)
+    return _batched_embedding_request(texts, LEGAL_EMBED_MODEL, LEGAL_EMBED_BATCH)
+
+
+def embed_with_code(texts: Sequence[str]) -> List[List[float]]:
+    """Create embeddings for code content using the configured remote model."""
+
+    return _batched_embedding_request(texts, CODE_EMBED_MODEL, CODE_EMBED_BATCH)
+
+
+def embed_with_gemini(texts: Sequence[str]) -> List[List[float]]:  # pragma: no cover - maintained for compatibility
+    """Backward compatible wrapper that now delegates to the general encoder."""
+
+    return embed_with_general(texts)
+
+
+def embed_with_voyage(texts: Sequence[str], *, model: str) -> List[List[float]]:  # pragma: no cover - maintained for compatibility
+    """Backward compatible wrapper that routes to specialised embedding helpers."""
+
+    canonical = model.lower()
+    if canonical in {"voyage-law-2", LEGAL_EMBED_MODEL}:
+        return embed_with_legal(texts)
+    if canonical in {"voyage-code-3", CODE_EMBED_MODEL}:
+        return embed_with_code(texts)
+    return _batched_embedding_request(texts, model, CODE_EMBED_BATCH)
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +417,12 @@ def _parse_summary_array(
 __all__ = [
     "ClassificationResult",
     "classify_domain",
+    "GENERAL_EMBED_MODEL",
+    "LEGAL_EMBED_MODEL",
+    "CODE_EMBED_MODEL",
+    "embed_with_general",
+    "embed_with_legal",
+    "embed_with_code",
     "embed_with_gemini",
     "embed_with_voyage",
     "summarize_chunks_with_gemini",

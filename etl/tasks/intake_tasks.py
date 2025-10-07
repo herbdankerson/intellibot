@@ -32,10 +32,14 @@ from .intake_models import (
 )
 from . import chunker
 from .model_clients import (
+    CODE_EMBED_MODEL,
+    GENERAL_EMBED_MODEL,
+    LEGAL_EMBED_MODEL,
     ClassificationResult,
     classify_domain,
-    embed_with_gemini,
-    embed_with_voyage,
+    embed_with_code,
+    embed_with_general,
+    embed_with_legal,
     summarize_chunks_with_gemini,
     summarize_with_gemini,
 )
@@ -48,8 +52,8 @@ LOGGER = logging.getLogger(__name__)
 
 CHUNK_TOKENS_DEFAULT = 500
 OVERLAP_MAX_PCT_DEFAULT = 0.15
-# Gemini embedding-001 supports ~8k tokens; ~30k chars keeps us just under the limit.
-EMBEDDING_001_CHAR_LIMIT = 30000
+# GTE-large handles long inputs comfortably; keep parity with the previous 30k char cap.
+GENERAL_EMBED_CHAR_LIMIT = 30000
 
 
 @task
@@ -297,36 +301,36 @@ def embed_chunks(item: IngestItem, chunks: List[Chunk]) -> List[ChunkEmbedding]:
 
     embeddings: List[ChunkEmbedding] = []
     texts = [chunk.text for chunk in chunks]
-    general_vectors = embed_with_gemini(texts)
+    general_vectors = embed_with_general(texts)
     for vector, chunk in zip(general_vectors, chunks):
         embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="general",
-                    model="gemini/embedding-001",
+                    space="emb-general",
+                    model=GENERAL_EMBED_MODEL,
                     vector=vector,
                 )
         )
 
     if (item.domain or "general") == "legal":
-        legal_vectors = embed_with_voyage(texts, model="voyage-law-2")
+        legal_vectors = embed_with_legal(texts)
         for vector, chunk in zip(legal_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="legal",
-                    model="voyage-law-2",
+                    space="emb-law",
+                    model=LEGAL_EMBED_MODEL,
                     vector=vector,
                 )
             )
     elif (item.domain or "general") == "code":
-        code_vectors = embed_with_voyage(texts, model="voyage-code-3")
+        code_vectors = embed_with_code(texts)
         for vector, chunk in zip(code_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="code",
-                    model="voyage-code-3",
+                    space="emb-code",
+                    model=CODE_EMBED_MODEL,
                     vector=vector,
                 )
             )
@@ -464,8 +468,8 @@ def persist_results(
         doc_text_for_embedding = (document.text or "").strip()
         if doc_text_for_embedding:
             try:
-                truncated = doc_text_for_embedding[:EMBEDDING_001_CHAR_LIMIT]
-                doc_embedding_result = embed_with_gemini([truncated])
+                truncated = doc_text_for_embedding[:GENERAL_EMBED_CHAR_LIMIT]
+                doc_embedding_result = embed_with_general([truncated])
                 if doc_embedding_result:
                     document_vector = list(doc_embedding_result[0])
             except Exception as exc:  # pragma: no cover - embedding failure depends on runtime
@@ -508,15 +512,15 @@ def persist_results(
             )
 
         if document_vector:
-            general_space_id = embedding_spaces.get("general")
+            general_space_id = embedding_spaces.get("emb-general")
             if general_space_id is None:
                 general_space_id = _ensure_embedding_space(
                     conn,
-                    "general",
-                    "gemini/embedding-001",
+                    "emb-general",
+                    GENERAL_EMBED_MODEL,
                     len(document_vector),
                 )
-                embedding_spaces["general"] = general_space_id
+                embedding_spaces["emb-general"] = general_space_id
             conn.execute(
                 text(
                     """
@@ -1007,7 +1011,12 @@ def _ensure_embedding_space(
     if existing:
         return existing[0]
 
-    provider = "google-gemini" if "gemini" in model or name == "general" else "voyage"
+    if name in {"emb-general", "emb-law"}:
+        provider = "local-tei"
+    elif name == "emb-code" or "gemini" in model:
+        provider = "google-gemini"
+    else:
+        provider = "voyage"
     distance = "cosine"
     result = conn.execute(
         text(

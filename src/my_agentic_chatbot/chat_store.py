@@ -17,8 +17,12 @@ from etl.tasks.intake_models import (
     new_ingest_item,
 )
 from etl.tasks.model_clients import (
-    embed_with_gemini,
-    embed_with_voyage,
+    CODE_EMBED_MODEL,
+    GENERAL_EMBED_MODEL,
+    LEGAL_EMBED_MODEL,
+    embed_with_code,
+    embed_with_general,
+    embed_with_legal,
     summarize_chunks_with_gemini,
     summarize_with_gemini,
 )
@@ -199,37 +203,37 @@ def _build_embeddings(item: IngestItem, chunks: List[Chunk], *, domain: str) -> 
     texts = [chunk.text for chunk in chunks]
     embeddings: List[ChunkEmbedding] = []
 
-    general_vectors = embed_with_gemini(texts)
+    general_vectors = embed_with_general(texts)
     for vector, chunk in zip(general_vectors, chunks):
         embeddings.append(
             ChunkEmbedding(
                 chunk_id=chunk.id,
-                space="general",
-                model="gemini/embedding-001",
+                space="emb-general",
+                model=GENERAL_EMBED_MODEL,
                 vector=vector,
             )
         )
 
     domain_key = (item.domain or domain or "general").lower()
     if domain_key == "legal":
-        voyage_vectors = embed_with_voyage(texts, model="voyage-law-2")
-        for vector, chunk in zip(voyage_vectors, chunks):
+        legal_vectors = embed_with_legal(texts)
+        for vector, chunk in zip(legal_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="legal",
-                    model="voyage-law-2",
+                    space="emb-law",
+                    model=LEGAL_EMBED_MODEL,
                     vector=vector,
                 )
             )
     elif domain_key == "code":
-        voyage_vectors = embed_with_voyage(texts, model="voyage-code-3")
-        for vector, chunk in zip(voyage_vectors, chunks):
+        code_vectors = embed_with_code(texts)
+        for vector, chunk in zip(code_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="code",
-                    model="voyage-code-3",
+                    space="emb-code",
+                    model=CODE_EMBED_MODEL,
                     vector=vector,
                 )
             )

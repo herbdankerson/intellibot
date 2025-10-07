@@ -15,7 +15,7 @@ import httpx
 from readability import Document
 import markdownify
 
-from etl.tasks.model_clients import embed_with_gemini, summarize_with_gemini
+from etl.tasks.model_clients import embed_with_general, summarize_with_gemini
 
 from ..config import MCPServerConfig, get_settings
 from ..ingestion.web_ingest import ingest_web_capture
@@ -339,7 +339,7 @@ class WebTool:
         snippets = [self._row_snippet(row) for row in rows]
         inputs = [query] + [snippet or query for snippet in snippets]
         try:
-            embeddings = embed_with_gemini(inputs)
+            embeddings = embed_with_general(inputs)
         except Exception as exc:  # pragma: no cover - embedding service may be offline
             LOGGER.warning("snippet embedding failed", extra={"query": query, "error": str(exc)})
             candidates = [

@@ -13,7 +13,14 @@ sys.modules.setdefault("litellm", litellm_stub)
 
 from etl.tasks import intake_models
 from etl.tasks import intake_tasks
-from etl.tasks.model_clients import summarize_chunks_with_gemini, embed_with_voyage, SUMMARIZER_MODEL
+from etl.tasks.model_clients import (
+    CODE_EMBED_MODEL,
+    GENERAL_EMBED_MODEL,
+    SUMMARIZER_MODEL,
+    embed_with_code,
+    embed_with_general,
+    summarize_chunks_with_gemini,
+)
 
 
 class DummyResult:
@@ -80,7 +87,7 @@ def test_summarize_chunks_with_gemini_parses_batch(monkeypatch):
     assert records[0]["model"] == SUMMARIZER_MODEL
 
 
-def test_embed_with_voyage_uses_litellm_embedding(monkeypatch):
+def test_embed_with_code_uses_litellm_embedding(monkeypatch):
     calls = []
 
     def fake_embedding(**kwargs):
@@ -89,10 +96,11 @@ def test_embed_with_voyage_uses_litellm_embedding(monkeypatch):
 
     monkeypatch.setattr("etl.tasks.model_clients.embedding", fake_embedding)
 
-    vectors = embed_with_voyage(["hello"], model="voyage-code-3")
+    vectors = embed_with_code(["hello"])
 
     assert vectors == [[0.1, 0.2, 0.3]]
     assert calls[0]["input"] == ["hello"]
+    assert calls[0]["model"] == CODE_EMBED_MODEL
 
 
 def test_acquire_source_fetches_remote(monkeypatch):
@@ -175,8 +183,8 @@ def test_persist_results_updates_ingest_item(monkeypatch):
     )
     embedding = intake_models.ChunkEmbedding(
         chunk_id=chunk.id,
-        space="general",
-        model="gemini/embedding-001",
+        space="emb-general",
+        model=GENERAL_EMBED_MODEL,
         vector=[0.1, 0.2],
     )
 
@@ -189,7 +197,7 @@ def test_persist_results_updates_ingest_item(monkeypatch):
     )
 
     assert report.chunk_count == 1
-    assert report.embedding_spaces == ["general"]
+    assert report.embedding_spaces == ["emb-general"]
     assert report.job_id == str(ingest_item.job_id)
     assert any("UPDATE kb.ingest_items" in stmt for stmt, _ in engine.statements)
     assert "chunk_abstractions" in report.ingest_item.metadata
