@@ -205,7 +205,7 @@ def _build_embeddings(item: IngestItem, chunks: List[Chunk], *, domain: str) -> 
             ChunkEmbedding(
                 chunk_id=chunk.id,
                 space="general",
-                model="gemini/text-embedding-004",
+                model="gemini/embedding-001",
                 vector=vector,
             )
         )

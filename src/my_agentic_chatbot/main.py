@@ -15,6 +15,7 @@ from .chat_store import persist_chat_transcript
 from .config import get_settings
 from .ingestion.service import IngestionService
 from .logging_conf import configure_logging
+from .llm_calls.llm_client import push_run_logger, reset_run_logger
 from .planner.main_planner import plan_from_message
 from .response.responder import Responder
 from .run_logging import AgentRunLogger
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
             audit_model=audit_model,
         )
 
+        token = push_run_logger(run_logger)
         try:
             plan = plan_from_message(
                 message,
@@ -83,6 +85,8 @@ def create_app() -> FastAPI:
         except Exception as exc:  # pragma: no cover - defensive
             run_logger.finalize(success=False, metadata={"error": str(exc)})
             raise
+        finally:
+            reset_run_logger(token)
 
     @app.get("/health")
     def health() -> dict[str, str]:

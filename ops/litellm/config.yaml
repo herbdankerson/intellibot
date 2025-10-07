@@ -97,63 +97,63 @@ model_list:
       api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-general
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-general
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-general
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-general
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-general
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-code
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-code
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-code
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-code
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-code
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-law
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_1
   - model_name: emb-law
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_2
   - model_name: emb-law
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_3
   - model_name: emb-law
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_4
   - model_name: emb-law
     litellm_params:
-      model: gemini/text-embedding-004
+      model: gemini/embedding-001
       api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: voyage-law-2
     litellm_params:

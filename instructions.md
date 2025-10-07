@@ -193,7 +193,7 @@ my_agentic_chatbot/
 
 **Embedding strategy**
 
-* **General**: Google `text-embedding-004` (or equivalent).
+* **General**: Google `embedding-001` (or equivalent).
 * **Specialized**: Code/Law encoders as additional spaces.
 * Maintain separate HNSW indexes per space + level.
 
@@ -232,11 +232,11 @@ model_list:
 
   # Embedding spaces
   - model_name: emb-general
-    litellm_params: { model: gemini/text-embedding-004 }
+    litellm_params: { model: gemini/embedding-001 }
   - model_name: emb-code
-    litellm_params: { model: gemini/text-embedding-004 }
+    litellm_params: { model: gemini/embedding-001 }
   - model_name: emb-law
-    litellm_params: { model: gemini/text-embedding-004 }
+    litellm_params: { model: gemini/embedding-001 }
 ```
 
 **Sample `ops/agents/planner.yaml`**

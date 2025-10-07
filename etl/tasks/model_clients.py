@@ -5,18 +5,23 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence
+from time import perf_counter
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import httpx
 
 from src.my_agentic_chatbot.config import get_settings
-from src.my_agentic_chatbot.llm_calls.llm_client import LLMClient, LLMMessage
+from src.my_agentic_chatbot.llm_calls.llm_client import (
+    LLMClient,
+    LLMMessage,
+    get_current_run_logger,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 SUMMARIZER_MODEL = "cheap-worker"
 CLASSIFIER_MODEL = "cheap-worker"
-GEMINI_EMBED_MODEL = "emb-general"
+GEMINI_EMBED_MODEL = "gemini/embedding-001"
 VOYAGE_LAW_MODEL = "voyage-law-2"
 VOYAGE_CODE_MODEL = "voyage-code-3"
 
@@ -24,6 +29,12 @@ GEMINI_SUMMARY_BATCH = 8
 GEMINI_EMBED_BATCH = 8
 VOYAGE_EMBED_BATCH = 16
 DEFAULT_RETRIES = 3
+
+
+def _truncate_snippet(text: str, limit: int = 320) -> Tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[: limit - 1] + "…", True
 
 
 def completion(
@@ -60,14 +71,71 @@ def embedding(*, model: str, input: Sequence[str]) -> Dict[str, object]:
     headers = dict(settings.lite_llm_headers())
     if settings.litellm_master_key and "Authorization" not in headers:
         headers["Authorization"] = f"Bearer {settings.litellm_master_key}"
-    with httpx.Client(base_url=base_url, timeout=timeout) as client:
-        response = client.post(
-            "/v1/embeddings",
-            json={"model": model, "input": list(input)},
-            headers=headers or None,
+    inputs = [str(text) for text in input]
+    preview = []
+    for idx, text in enumerate(inputs[:3]):
+        snippet, truncated = _truncate_snippet(text)
+        preview.append(
+            {
+                "index": idx,
+                "length": len(text),
+                "snippet": snippet,
+                "truncated": truncated,
+            }
         )
-        response.raise_for_status()
-        return response.json()
+    logger = get_current_run_logger()
+    log_payload = {
+        "endpoint": "embeddings",
+        "model": model,
+        "input_count": len(inputs),
+        "input_preview": preview,
+    }
+    start = perf_counter()
+    with httpx.Client(base_url=base_url, timeout=timeout) as client:
+        try:
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": model, "input": inputs},
+                headers=headers or None,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if logger is not None:
+                vectors = data.get("data") if isinstance(data, dict) else None
+                dims = 0
+                if vectors and isinstance(vectors, list) and vectors and isinstance(vectors[0], dict):
+                    embedding = vectors[0].get("embedding")
+                    if isinstance(embedding, list):
+                        dims = len(embedding)
+                log_payload.update(
+                    {
+                        "status_code": response.status_code,
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "vector_dims": dims,
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="success",
+                )
+            return data
+        except Exception as exc:
+            if logger is not None:
+                log_payload.update(
+                    {
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "error": str(exc),
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="error",
+                )
+            raise
 
 
 @dataclass(frozen=True)
@@ -199,7 +267,7 @@ def classify_domain(text: str) -> ClassificationResult:
 
 
 def embed_with_gemini(texts: Sequence[str]) -> List[List[float]]:
-    """Create embeddings with Gemini `text-embedding-004` via LiteLLM."""
+    """Create embeddings with Gemini `embedding-001` via LiteLLM."""
 
     return _batched_embedding_request(texts, GEMINI_EMBED_MODEL, GEMINI_EMBED_BATCH)
 

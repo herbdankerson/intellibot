@@ -20,7 +20,7 @@ The router is locked to Gemini 2.5 models:
 
 - `gemini/gemini-2.5-pro` powers the `planner` and `responder` agents.
 - `gemini/gemini-2.5-flash` backs the `cheap-worker` helper.
-- `gemini/text-embedding-004` handles all embedding aliases.
+- `gemini/embedding-001` handles all embedding aliases.
 
 With `litellm_settings.num_retries` set, the proxy will transparently fail over
 across the configured keys before surfacing an error to clients.

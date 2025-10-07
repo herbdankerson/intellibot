@@ -176,7 +176,7 @@ def test_persist_results_updates_ingest_item(monkeypatch):
     embedding = intake_models.ChunkEmbedding(
         chunk_id=chunk.id,
         space="general",
-        model="gemini/text-embedding-004",
+        model="gemini/embedding-001",
         vector=[0.1, 0.2],
     )
 

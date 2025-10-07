@@ -17,7 +17,7 @@ from ..constants import (
     ACCEPTANCE_STRICT_MIN_SOURCES,
     MAX_WORKFLOW_ITERATIONS,
 )
-from ..planner.main_planner import revise_plan_with_evidence
+from ..llm_calls.llm_client import push_run_logger, reset_run_logger
 from ..response.responder import Responder
 from ..run_logging import AgentRunLogger
 from ..schemas import (
@@ -80,6 +80,7 @@ class WorkflowInput:
     plan: Plan
     deliver_response: bool
     run_logger: AgentRunLogger | None
+    run_id: str
 
 
 @dataclass
@@ -91,6 +92,7 @@ class PlanLoopState:
     report: ExecutionReport
     run_logger: AgentRunLogger | None
     deliver_response: bool
+    run_id: str = field(default_factory=generate_run_id)
     evidence: List[EvidenceItem] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)
     open_questions: List[OpenQuestion] = field(default_factory=list)
@@ -134,14 +136,14 @@ class ToolSuite:
         legal: MCPJsonTool | None = None,
         custom_agents: Dict[str, CustomAgentRunner] | None = None,
     ) -> None:
-        self.db = db or DatabaseTool()
-        self.graph = graph or GraphTool()
-        self.web = web or WebTool()
         self.sequential = sequential or SequentialThinkingTool(
             server_name="sequentialthinking",
             default_tool="sequentialthinking",
             id_prefix="seq",
         )
+        self.db = db or DatabaseTool()
+        self.graph = graph or GraphTool()
+        self.web = web or WebTool(sequential_tool=self.sequential)
         self.neo4j_cypher = neo4j_cypher or MCPJsonTool(
             server_name="neo4j-cypher",
             default_tool="read_neo4j_cypher",
@@ -283,13 +285,14 @@ class InitializeRun(Executor):
     async def start(self, payload: WorkflowInput, ctx: WorkflowContext) -> None:
         plan = payload.plan
         run_logger = payload.run_logger
-        report = ExecutionReport(run_id=generate_run_id())
+        report = ExecutionReport(run_id=payload.run_id)
         state = PlanLoopState(
             user_message=payload.user_message,
             plan=plan,
             report=report,
             run_logger=run_logger,
             deliver_response=payload.deliver_response,
+            run_id=payload.run_id,
             max_iterations=self._settings.af_max_iterations,
             acceptance_threshold=self._settings.acceptance_confidence_threshold,
             base_min_sources=ACCEPTANCE_BASE_MIN_SOURCES,
@@ -511,8 +514,14 @@ class ExecuteTasks(Executor):
                     error=message,
                 )
             return None
+        enriched_inputs = dict(task.inputs)
+        enriched_inputs.setdefault("_run_id", state.run_id)
+        enriched_inputs.setdefault("_requirement_id", requirement.id)
+        enriched_inputs.setdefault("_task_id", task.id)
+        enriched_inputs.setdefault("_iteration", state.iteration)
+        task_for_tool = task.model_copy(update={"inputs": enriched_inputs})
         try:
-            return runner(task, requirement)
+            return runner(task_for_tool, requirement)
         except Exception as exc:  # pragma: no cover - defensive
             state.task_status[task.id] = TaskStatus.FAILED
             message = f"Tool execution failed: {exc}"[:400]
@@ -674,6 +683,8 @@ class RevisePlan(Executor):
             await ctx.send_message(state, target_id=self._selector_id)
             return
         try:
+            from ..planner.main_planner import revise_plan_with_evidence  # local import to avoid cycles
+
             revised_plan = await asyncio.to_thread(
                 revise_plan_with_evidence,
                 state.plan,
@@ -874,14 +885,20 @@ class WorkflowOrchestrator:
         message: str | None = None,
         run_logger: AgentRunLogger | None = None,
     ) -> ExecutionResult:
-        state = self._run_workflow(
-            WorkflowInput(
-                user_message=message or plan.problem_spec,
-                plan=plan,
-                deliver_response=False,
-                run_logger=run_logger,
+        token = push_run_logger(run_logger) if run_logger is not None else None
+        try:
+            state = self._run_workflow(
+                WorkflowInput(
+                    user_message=message or plan.problem_spec,
+                    plan=plan,
+                    deliver_response=False,
+                    run_logger=run_logger,
+                    run_id=str(run_logger.run_id) if run_logger else generate_run_id(),
+                )
             )
-        )
+        finally:
+            if token is not None:
+                reset_run_logger(token)
         evidence_pack = state.evidence_pack or assemble_evidence(state.evidence)
         return ExecutionResult(
             evidence=evidence_pack,
@@ -896,14 +913,20 @@ class WorkflowOrchestrator:
         *,
         run_logger: AgentRunLogger | None = None,
     ) -> tuple[AgentResponse, ExecutionResult]:
-        state = self._run_workflow(
-            WorkflowInput(
-                user_message=message,
-                plan=plan,
-                deliver_response=True,
-                run_logger=run_logger,
+        token = push_run_logger(run_logger) if run_logger is not None else None
+        try:
+            state = self._run_workflow(
+                WorkflowInput(
+                    user_message=message,
+                    plan=plan,
+                    deliver_response=True,
+                    run_logger=run_logger,
+                    run_id=str(run_logger.run_id) if run_logger else generate_run_id(),
+                )
             )
-        )
+        finally:
+            if token is not None:
+                reset_run_logger(token)
         evidence_pack = state.evidence_pack or assemble_evidence(state.evidence)
         if state.response is None:
             response = AgentResponse(
@@ -973,13 +996,14 @@ class WorkflowOrchestrator:
         outputs = events.get_outputs()
         if not outputs:
             LOGGER.error("Workflow produced no outputs; returning empty state")
-            empty_report = ExecutionReport(run_id=generate_run_id(), successful=False)
+            empty_report = ExecutionReport(run_id=payload.run_id, successful=False)
             return PlanLoopState(
                 user_message=payload.user_message,
                 plan=payload.plan,
                 report=empty_report,
                 run_logger=payload.run_logger,
                 deliver_response=payload.deliver_response,
+                run_id=payload.run_id,
                 terminated=True,
                 termination_reason="Workflow produced no outputs",
             )

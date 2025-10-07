@@ -3,15 +3,84 @@
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from time import perf_counter
+from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import httpx
 
 from ..agents import AgentConfig
 from ..config import get_settings
 
+if TYPE_CHECKING:  # pragma: no cover - typing helper
+    from ..run_logging import AgentRunLogger
+
 LOGGER = logging.getLogger(__name__)
+
+
+_CURRENT_RUN_LOGGER: ContextVar["AgentRunLogger | None"] = ContextVar(
+    "current_run_logger",
+    default=None,
+)
+
+
+def push_run_logger(logger: "AgentRunLogger | None") -> Token["AgentRunLogger | None"]:
+    """Bind a run logger to the current execution context."""
+
+    return _CURRENT_RUN_LOGGER.set(logger)
+
+
+def reset_run_logger(token: Token["AgentRunLogger | None"]) -> None:
+    """Restore the previously bound run logger."""
+
+    _CURRENT_RUN_LOGGER.reset(token)
+
+
+def get_current_run_logger() -> "AgentRunLogger | None":
+    """Return the run logger for the current context if available."""
+
+    return _CURRENT_RUN_LOGGER.get()
+
+
+def _truncate_text(value: str, limit: int = 2000) -> Tuple[str, bool]:
+    if len(value) <= limit:
+        return value, False
+    return value[: limit - 1] + "…", True
+
+
+def _serialize_messages(messages: Sequence[Dict[str, str]]) -> Sequence[Dict[str, object]]:
+    serialized: list[Dict[str, object]] = []
+    for entry in messages:
+        content = str(entry.get("content") or "")
+        truncated, did_truncate = _truncate_text(content)
+        serialized.append(
+            {
+                "role": entry.get("role"),
+                "content": truncated,
+                "truncated": did_truncate,
+            }
+        )
+    return serialized
+
+
+def _serialize_choices(data: Optional[Sequence[Dict[str, Any]]]) -> Sequence[Dict[str, object]]:
+    output: list[Dict[str, object]] = []
+    if not data:
+        return output
+    for item in data[:3]:
+        message = item.get("message") if isinstance(item, dict) else {}
+        content = "" if message is None else str(message.get("content", ""))
+        truncated, did_truncate = _truncate_text(content)
+        output.append(
+            {
+                "finish_reason": item.get("finish_reason"),
+                "index": item.get("index"),
+                "content": truncated,
+                "truncated": did_truncate,
+            }
+        )
+    return output
 
 
 @dataclass
@@ -37,6 +106,7 @@ class LLMClient:
         timeout: Optional[float] = None,
         headers: Optional[Dict[str, str]] = None,
         http_client: Optional[httpx.Client] = None,
+        run_logger: "AgentRunLogger | None" = None,
     ) -> None:
         settings = get_settings()
         self.model_name = model_name
@@ -49,6 +119,7 @@ class LLMClient:
             base_url=self.base_url,
             timeout=self.timeout,
         )
+        self.run_logger = run_logger
 
     def close(self) -> None:
         """Dispose of the underlying HTTP client if owned."""
@@ -68,9 +139,10 @@ class LLMClient:
             "generation_config_override", None
         )
 
+        request_messages = [message.as_dict() for message in messages]
         payload: Dict[str, Any] = {
             "model": self.model_name,
-            "messages": [message.as_dict() for message in messages],
+            "messages": request_messages,
             "temperature": self.temperature,
         }
         if kwargs:
@@ -107,20 +179,64 @@ class LLMClient:
                 "generationConfig", {"responseModalities": ["TEXT"]}
             )
 
-        LOGGER.debug("liteLLM chat request", extra={"model": self.model_name})
-        response = self._client.post(
-            "/v1/chat/completions",
-            json=payload,
-            headers=self.headers,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            LOGGER.warning("LiteLLM returned no choices", extra={"model": self.model_name})
-            return ""
-        message = choices[0].get("message", {})
-        return message.get("content", "") or ""
+        log_payload = {
+            "endpoint": "chat.completions",
+            "model": self.model_name,
+            "temperature": self.temperature,
+            "kwargs": {key: value for key, value in kwargs.items()},
+            "extra_body": payload.get("extra_body"),
+            "messages": _serialize_messages(request_messages),
+        }
+
+        logger = self.run_logger or get_current_run_logger()
+        start = perf_counter()
+        try:
+            LOGGER.debug("liteLLM chat request", extra={"model": self.model_name})
+            response = self._client.post(
+                "/v1/chat/completions",
+                json=payload,
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices", [])
+            if logger is not None:
+                log_payload.update(
+                    {
+                        "status_code": response.status_code,
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "response": {
+                            "choices": _serialize_choices(choices),
+                            "usage": data.get("usage"),
+                        },
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="success",
+                )
+            if not choices:
+                LOGGER.warning("LiteLLM returned no choices", extra={"model": self.model_name})
+                return ""
+            message = choices[0].get("message", {})
+            return message.get("content", "") or ""
+        except Exception as exc:
+            if logger is not None:
+                log_payload.update(
+                    {
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "error": str(exc),
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="error",
+                )
+            raise
 
     def complete(self, prompt: str, **kwargs: Any) -> str:
         """Send completion request to LiteLLM and return the text response."""
@@ -132,24 +248,83 @@ class LLMClient:
         }
         if kwargs:
             payload.update(kwargs)
-        LOGGER.debug("liteLLM completion request", extra={"model": self.model_name})
-        response = self._client.post(
-            "/v1/completions",
-            json=payload,
-            headers=self.headers,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            LOGGER.warning(
-                "LiteLLM returned no completion choices", extra={"model": self.model_name}
+        logger = self.run_logger or get_current_run_logger()
+        prompt_preview, prompt_truncated = _truncate_text(str(prompt))
+        log_payload = {
+            "endpoint": "completions",
+            "model": self.model_name,
+            "temperature": self.temperature,
+            "prompt": prompt_preview,
+            "prompt_truncated": prompt_truncated,
+            "kwargs": {key: value for key, value in kwargs.items()},
+        }
+        start = perf_counter()
+        try:
+            LOGGER.debug("liteLLM completion request", extra={"model": self.model_name})
+            response = self._client.post(
+                "/v1/completions",
+                json=payload,
+                headers=self.headers,
             )
-            return ""
-        text = choices[0].get("text", "")
-        if isinstance(text, list):  # safety for streaming-style responses
-            text = "".join(str(part) for part in text)
-        return text or ""
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices", [])
+            if logger is not None:
+                preview = ""
+                truncated = False
+                if choices:
+                    text = choices[0].get("text", "")
+                    if isinstance(text, list):
+                        text = "".join(str(part) for part in text)
+                    preview, truncated = _truncate_text(str(text))
+                log_payload.update(
+                    {
+                        "status_code": response.status_code,
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "response": {
+                            "choices": [
+                                {
+                                    "index": choices[0].get("index") if choices else 0,
+                                    "text": preview,
+                                    "truncated": truncated,
+                                }
+                            ]
+                            if choices
+                            else [],
+                            "usage": data.get("usage"),
+                        },
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="success",
+                )
+            if not choices:
+                LOGGER.warning(
+                    "LiteLLM returned no completion choices", extra={"model": self.model_name}
+                )
+                return ""
+            text = choices[0].get("text", "")
+            if isinstance(text, list):  # safety for streaming-style responses
+                text = "".join(str(part) for part in text)
+            return text or ""
+        except Exception as exc:
+            if logger is not None:
+                log_payload.update(
+                    {
+                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+                        "error": str(exc),
+                    }
+                )
+                logger.log_event(
+                    "llm_call",
+                    log_payload,
+                    tool="liteLLM",
+                    status="error",
+                )
+            raise
 
     def __enter__(self) -> "LLMClient":  # pragma: no cover - convenience
         return self
@@ -158,4 +333,10 @@ class LLMClient:
         self.close()
 
 
-__all__ = ["LLMClient", "LLMMessage"]
+__all__ = [
+    "LLMClient",
+    "LLMMessage",
+    "get_current_run_logger",
+    "push_run_logger",
+    "reset_run_logger",
+]

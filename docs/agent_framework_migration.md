@@ -50,8 +50,8 @@ For each requirement we compute:
 - `issues`: missing corroboration, low authority, conflicts
 
 Requirement considered satisfied when:
-- `confidence ≥ threshold` (default 0.7)
-- `len(supporting_sources) ≥ min_sources` (default 2 for “high” quality bars, 1 otherwise)
+- `confidence ≥ threshold` (default 0.75)
+- `len(supporting_sources) ≥ min_sources` (default 2; 3 for “high/strict” quality bars)
 
 Unmet requirements produce `OpenQuestion` entries to feed the planner revision prompt.
 
@@ -97,10 +97,19 @@ Unmet requirements produce `OpenQuestion` entries to feed the planner revision p
    - Update README with Agent Framework notes + container instructions.
    - Document new settings (iteration limits, thresholds) in `instructions.md` if relevant.
 
+## Web Curation + KB Ingestion
+
+- Introduced `agent.web_work_items` staging table (run-scoped, TTL) for raw search hits and curated captures.
+- `WebTool` now performs `search → fetch/render → summarize → ingest` for each candidate URL:
+  - Clears the staging table for the current run, logs SearxNG hits, and calls Sequential Thinking for gap heuristics.
+  - Fetches HTML (httpx) with Playwright MCP fallback, converts to Markdown (readability + markdownify), and scores authority/topicality/locality.
+  - Summarizes relevance with Gemini, converts HTML→Markdown→chunks, and persists to ParadeDB via `ingest_web_capture` (shared ETL helpers).
+  - Records curated artefacts (KB document + chunk IDs) back into `agent.web_work_items` and returns the highest scored snippets as evidence.
+- Acceptance defaults tightened (`min_sources` base=2, strict=3; `confidence_threshold`=0.75) so the AF loop keeps iterating until curated evidence meets quality bars.
+
 ## Risks & Mitigations
 
 - **Preview SDK changes** – pin to known beta build and expose single upgrade flag in requirements.
 - **Dependency bloat** – use selective import to avoid heavy optional extras (DevUI, Copilot Studio) unless required.
 - **Loop stalls** – enforce deterministic fallback (limit iterations, escalate to unresolved questions in final answer).
 - **Performance** – reuse existing dedupe/snippet utilities; clip evidence before returning to responder.
-

@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS kb.chunk_embeddings (
     PRIMARY KEY (chunk_id, space_id)
 );
 
+CREATE TABLE IF NOT EXISTS kb.document_embeddings (
+    document_id UUID REFERENCES kb.documents(id) ON DELETE CASCADE,
+    space_id INTEGER REFERENCES kb.embedding_spaces(id) ON DELETE CASCADE,
+    embedding VECTOR,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (document_id, space_id)
+);
+
 CREATE SCHEMA IF NOT EXISTS agent;
 
 CREATE TABLE IF NOT EXISTS agent.runs (
@@ -113,3 +121,40 @@ CREATE TABLE IF NOT EXISTS agent.events (
 
 CREATE INDEX IF NOT EXISTS idx_agent_events_run ON agent.events (run_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_events_type ON agent.events (event_type);
+
+CREATE TABLE IF NOT EXISTS agent.web_work_items (
+    id UUID PRIMARY KEY,
+    run_id UUID NOT NULL,
+    requirement_id TEXT,
+    task_id TEXT,
+    query TEXT NOT NULL,
+    source_url TEXT,
+    source_title TEXT,
+    raw_result JSONB DEFAULT '{}'::jsonb,
+    snippet TEXT,
+    query_embedding VECTOR(768),
+    snippet_embedding VECTOR(768),
+    retrieval_score NUMERIC,
+    fetch_status TEXT,
+    http_status INTEGER,
+    fetched_at TIMESTAMPTZ,
+    rendered_at TIMESTAMPTZ,
+    html TEXT,
+    markdown TEXT,
+    summary TEXT,
+    authority_score NUMERIC,
+    topicality_score NUMERIC,
+    locality_score NUMERIC,
+    curated BOOLEAN DEFAULT FALSE,
+    curated_reason TEXT,
+    kb_document_id UUID,
+    kb_chunk_ids UUID[] DEFAULT ARRAY[]::UUID[],
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '48 hours'
+);
+
+CREATE INDEX IF NOT EXISTS idx_web_work_items_run ON agent.web_work_items (run_id);
+CREATE INDEX IF NOT EXISTS idx_web_work_items_curated ON agent.web_work_items (run_id, curated);
+CREATE INDEX IF NOT EXISTS idx_web_work_items_expires ON agent.web_work_items (expires_at);

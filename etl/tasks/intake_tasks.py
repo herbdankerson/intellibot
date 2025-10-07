@@ -48,6 +48,8 @@ LOGGER = logging.getLogger(__name__)
 
 CHUNK_TOKENS_DEFAULT = 500
 OVERLAP_MAX_PCT_DEFAULT = 0.15
+# Gemini embedding-001 supports ~8k tokens; ~30k chars keeps us just under the limit.
+EMBEDDING_001_CHAR_LIMIT = 30000
 
 
 @task
@@ -298,12 +300,12 @@ def embed_chunks(item: IngestItem, chunks: List[Chunk]) -> List[ChunkEmbedding]:
     general_vectors = embed_with_gemini(texts)
     for vector, chunk in zip(general_vectors, chunks):
         embeddings.append(
-            ChunkEmbedding(
-                chunk_id=chunk.id,
-                space="general",
-                model="gemini/text-embedding-004",
-                vector=vector,
-            )
+                ChunkEmbedding(
+                    chunk_id=chunk.id,
+                    space="general",
+                    model="gemini/embedding-001",
+                    vector=vector,
+                )
         )
 
     if (item.domain or "general") == "legal":
@@ -348,9 +350,7 @@ def persist_results(
     language = str(document.metadata.get("language", "und")) if isinstance(document.metadata, dict) else "und"
     tsvector_config = _tsvector_config(language)
 
-    document_id: Optional[str] = None
-    if item.source_type == "document":
-        document_id = str(uuid4())
+    document_id: str = str(uuid4())
 
     ingest_metadata = dict(item.metadata)
     ingest_metadata.update(
@@ -455,9 +455,24 @@ def persist_results(
                 ),
                 {
                     **mapping,
+                    "document_id": document_id,
                     "ts_config": tsvector_config,
                 },
             )
+
+        document_vector: Optional[List[float]] = None
+        doc_text_for_embedding = (document.text or "").strip()
+        if doc_text_for_embedding:
+            try:
+                truncated = doc_text_for_embedding[:EMBEDDING_001_CHAR_LIMIT]
+                doc_embedding_result = embed_with_gemini([truncated])
+                if doc_embedding_result:
+                    document_vector = list(doc_embedding_result[0])
+            except Exception as exc:  # pragma: no cover - embedding failure depends on runtime
+                LOGGER.warning(
+                    "Document embedding failed",
+                    extra={"ingest_item": str(item.id), "error": str(exc)},
+                )
 
         for embedding_payload in embeddings:
             space_id = embedding_spaces.get(embedding_payload.space)
@@ -490,6 +505,33 @@ def persist_results(
                     """
                 ),
                 payload,
+            )
+
+        if document_vector:
+            general_space_id = embedding_spaces.get("general")
+            if general_space_id is None:
+                general_space_id = _ensure_embedding_space(
+                    conn,
+                    "general",
+                    "gemini/embedding-001",
+                    len(document_vector),
+                )
+                embedding_spaces["general"] = general_space_id
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO kb.document_embeddings (document_id, space_id, embedding)
+                    VALUES (:document_id, :space_id, CAST(:embedding AS vector))
+                    ON CONFLICT (document_id, space_id) DO UPDATE
+                    SET embedding = EXCLUDED.embedding,
+                        created_at = NOW()
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "space_id": general_space_id,
+                    "embedding": _vector_literal(document_vector),
+                },
             )
 
     ner_total = sum(len(chunk.ner_entities) for chunk in chunks)

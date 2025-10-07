@@ -5,11 +5,16 @@ outlined in `instructions.md`. It now wires the runtime stack described in the p
 contract:
 
 - LiteLLM is the single entrypoint for planner/responder/embedding calls.
-- The workflow orchestrator runs as a Prefect flow with approvals at plan, task, and
-  final-response checkpoints.
+- The runtime orchestrator is implemented with the Microsoft Agent Framework (state-machine
+  workflow with acceptance-aware loops). Prefect remains in the stack for ETL and long-running
+  ingestion jobs, not for the interactive chat workflow.
+- A dedicated web-curation pipeline converts SearxNG hits into curated Markdown captures: the
+  web agent runs Sequential Thinking, fetches HTML (httpx + Playwright MCP fallback), converts
+  to Markdown, summarizes relevance, and ingests the result into ParadeDB/pgvector before
+  handing evidence to the planner loop.
 - Database tools communicate with the Postgres MCP server over FastMCP SSE transport.
-- Docker Compose spins up ParadeDB/Postgres, LiteLLM, Prefect, OpenWebUI, and the
-  Postgres MCP sidecar.
+- Docker Compose spins up ParadeDB/Postgres, LiteLLM, Prefect, OpenWebUI, SearxNG, and the
+  Postgres/Playwright MCP sidecars.
 
 ## Quick start
 
@@ -74,8 +79,8 @@ pip install -r requirements.txt
 pytest
 ```
 
-The test suite now covers the Prefect workflow, MCP client normalization, and the
-LiteLLM-backed planner/responder adapters.
+The test suite covers the Agent Framework orchestrator loop, MCP client normalization,
+and the LiteLLM-backed planner/responder adapters.
 
 ## Running the API
 

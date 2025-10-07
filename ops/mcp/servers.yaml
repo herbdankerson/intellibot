@@ -47,3 +47,10 @@ servers:
     url: http://mcp-gateway-sequentialthinking:8080/mcp/
     tools:
       - sequentialthinking
+  playwright:
+    url: http://mcp-gateway-playwright:8080/mcp/
+    tools:
+      - browser_navigate
+      - browser_snapshot
+      - browser_evaluate
+      - browser_screenshot

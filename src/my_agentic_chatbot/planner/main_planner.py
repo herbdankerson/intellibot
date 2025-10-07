@@ -14,7 +14,12 @@ from ..constants import (
     DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
     DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
 )
-from ..llm_calls.llm_client import LLMClient, LLMMessage
+from ..llm_calls.llm_client import (
+    LLMClient,
+    LLMMessage,
+    push_run_logger,
+    reset_run_logger,
+)
 from ..run_logging import AgentRunLogger
 from ..schemas import Finding, OpenQuestion, Plan, PlanTask, Requirement
 from ..util.text import extract_subject_and_location, squeeze_whitespace
@@ -45,6 +50,7 @@ def plan_from_message(
     if not normalized:
         raise ValueError("Planner requires a non-empty message")
 
+    token = push_run_logger(logger) if logger is not None else None
     planner_client, target_model = _resolve_client(model=model, client=client)
     owns_client = client is None
     try:
@@ -67,6 +73,8 @@ def plan_from_message(
     finally:
         if owns_client:
             planner_client.close()
+        if token is not None:
+            reset_run_logger(token)
 
     payload = _parse_plan_response(response, fallback_problem_spec=normalized)
     normalized_payload = _normalize_payload(payload, normalized)
@@ -90,6 +98,7 @@ def revise_plan_with_evidence(
 
     planner_client, target_model = _resolve_client(model=model, client=client)
     owns_client = client is None
+    token = push_run_logger(logger) if logger is not None else None
     try:
         messages = _build_revision_messages(
             plan=plan,
@@ -111,6 +120,8 @@ def revise_plan_with_evidence(
     finally:
         if owns_client:
             planner_client.close()
+        if token is not None:
+            reset_run_logger(token)
 
     payload = _parse_plan_response(response, fallback_problem_spec=plan.problem_spec)
     normalized_payload = _normalize_payload(payload, plan.problem_spec)
