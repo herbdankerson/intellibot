@@ -48,6 +48,8 @@ pro2codex-EXAMPLE-ONLY/
 pro2codex-*.zip
 etl_scaffold.zip
 ops/cloudflared/cloudflared
+ops/ollama/cache/
+models/
 
 # MCP data staging (keep directory structure via .gitkeep)
 mcp/legal-knowledge-base/data/inbox/*

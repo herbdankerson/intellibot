@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .chat_store import persist_chat_transcript
 from .config import get_settings
+from .runtime_config import get_runtime_config
 from .ingestion.service import IngestionService
 from .logging_conf import configure_logging
 from .llm_calls.llm_client import push_run_logger, reset_run_logger
@@ -28,7 +29,13 @@ def create_app() -> FastAPI:
 
     configure_logging()
     settings = get_settings()
-    orchestrator = WorkflowOrchestrator(responder=Responder(model_name=settings.responder_model))
+    runtime_config = get_runtime_config()
+    planner_model_cfg = runtime_config.active("active_planner_model")
+    responder_model_cfg = runtime_config.active("active_responder_model")
+    planner_identifier = planner_model_cfg.identifier
+    responder_identifier = responder_model_cfg.identifier
+
+    orchestrator = WorkflowOrchestrator(responder=Responder())
     ingestion_service = IngestionService()
 
     app = FastAPI(title="Agentic Chatbot", version="0.2.0")
@@ -41,8 +48,8 @@ def create_app() -> FastAPI:
         run_logger = AgentRunLogger()
         run_logger.begin_run(
             user_message=message,
-            planner_model=settings.planner_model,
-            responder_model=settings.responder_model,
+            planner_model=planner_model_cfg.name,
+            responder_model=responder_model_cfg.name,
             audit_model=audit_model,
         )
 
@@ -50,7 +57,7 @@ def create_app() -> FastAPI:
         try:
             plan = plan_from_message(
                 message,
-                model=settings.planner_model,
+                model=planner_identifier,
                 logger=run_logger,
             )
             response, result = orchestrator.run_pipeline(
@@ -90,7 +97,7 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "planner_model": settings.planner_model}
+        return {"status": "ok", "planner_model": planner_model_cfg.name}
 
     @app.post("/run", response_model=AgentResponse)
     def run(query: UserQuery) -> AgentResponse:
