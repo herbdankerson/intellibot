@@ -28,7 +28,7 @@ services:
 
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    entrypoint: ["/app/start.sh"]
     ports:
       - "4000:4000"
     env_file:
@@ -38,6 +38,8 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     volumes:
       - ./ops/litellm/config.yaml:/app/config.yaml:ro
+      - ./ops/litellm/render_config.py:/app/render_config.py:ro
+      - ./ops/litellm/start.sh:/app/start.sh:ro
     depends_on:
       - paradedb
 
@@ -344,7 +346,7 @@ services:
   tei-gte-large:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-0.7
     environment:
-      - MODEL_ID=/models/gte-large-st
+      - MODEL_ID=${TEI_GTE_LARGE_MODEL_ID:-/models/gte-large-st}
     volumes:
       - ./models:/models:ro
     ports: ["6060:80"]
@@ -357,7 +359,7 @@ services:
   tei-legal:
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-0.7
     environment:
-      - MODEL_ID=/models/legal-bert-st
+      - MODEL_ID=${TEI_LEGAL_MODEL_ID:-/models/legal-bert-st}
     volumes:
       - ./models:/models:ro
     ports: ["6061:80"]

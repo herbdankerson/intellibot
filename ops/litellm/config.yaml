@@ -27,17 +27,20 @@ model_list:
     litellm_params:
       model: thenlper/gte-large
       api_base: ${TEI_GTE_LARGE_URL}
-      provider: text-embeddings-inference
+      custom_llm_provider: openai
+      api_key: ${TEI_GTE_LARGE_API_KEY:-dummy-tei-token}
   - model_name: emb-legal
     litellm_params:
       model: nlpaueb/legal-bert-base-uncased
       api_base: ${TEI_LEGAL_BERT_URL}
-      provider: text-embeddings-inference
+      custom_llm_provider: openai
+      api_key: ${TEI_LEGAL_BERT_API_KEY:-dummy-tei-token}
   - model_name: emb-code
     litellm_params:
       model: thenlper/gte-large
       api_base: ${TEI_GTE_LARGE_URL}
-      provider: text-embeddings-inference
+      custom_llm_provider: openai
+      api_key: ${TEI_GTE_LARGE_API_KEY:-dummy-tei-token}
   - model_name: voyage-law-2
     litellm_params:
       model: voyage-law-2

@@ -157,9 +157,9 @@ VALUES
     ('planner-local-smollm', 'litellm', 'planner', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Local planner routed through LiteLLM'),
     ('responder-local-smollm', 'litellm', 'responder', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Local responder routed through LiteLLM'),
     ('worker-local-smollm', 'litellm', 'cheap-worker', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Lightweight worker for summaries and classification'),
-    ('emb-general', 'litellm', 'emb-general', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'General embeddings via TEI GTE-large'),
-    ('emb-legal', 'litellm', 'emb-legal', '${LITELLM_BASE_URL}', 768, 'embedding', '1', 'Legal embeddings via TEI Legal-BERT'),
-    ('emb-code', 'litellm', 'emb-code', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'Code embeddings alias (defaults to general)')
+    ('emb-general', 'litellm', 'emb-general', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'General embeddings routed to thenlper/gte-large via LiteLLM'),
+    ('emb-legal', 'litellm', 'emb-legal', '${LITELLM_BASE_URL}', 768, 'embedding', '1', 'Legal embeddings routed to nlpaueb/legal-bert-base-uncased via LiteLLM'),
+    ('emb-code', 'litellm', 'emb-code', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'Code embeddings alias routed to thenlper/gte-large via LiteLLM')
 ON CONFLICT (name) DO UPDATE
 SET
     provider = EXCLUDED.provider,
