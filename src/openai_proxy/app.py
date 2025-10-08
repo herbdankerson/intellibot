@@ -12,9 +12,17 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-DEFAULT_BASE_URL = os.getenv("LITELLM_ROUTER_BASE_URL") or os.getenv(
-    "LITELLM_BASE_URL", "http://litellm:4000"
-)
+def _resolve_base_url() -> str:
+    for env_name in ("LITELLM_ROUTER_BASE_URL", "LITELLM_BASE_URL"):
+        value = os.getenv(env_name)
+        if value:
+            return value
+    raise RuntimeError(
+        "LiteLLM base URL is not configured; set LITELLM_ROUTER_BASE_URL or LITELLM_BASE_URL"
+    )
+
+
+DEFAULT_BASE_URL = _resolve_base_url()
 DEFAULT_TIMEOUT = float(os.getenv("OPENAI_PROXY_TIMEOUT", os.getenv("LITELLM_TIMEOUT_SECONDS", "60")))
 DEFAULT_VIRTUAL_KEY = os.getenv("LITELLM_VIRTUAL_KEY")
 ROUTER_PREFIX = os.getenv("OPENAI_PROXY_PREFIX", "/v1")

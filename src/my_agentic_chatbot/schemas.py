@@ -140,12 +140,12 @@ class Plan(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_relationships(cls, model: "Plan") -> "Plan":  # type: ignore[override]
-        requirement_ids: Set[str] = {req.id for req in model.requirements}
-        if len(requirement_ids) != len(model.requirements):
+    def _validate_relationships(self) -> "Plan":
+        requirement_ids: Set[str] = {req.id for req in self.requirements}
+        if len(requirement_ids) != len(self.requirements):
             raise ValueError("Requirements must have unique identifiers")
 
-        for task in model.tasks:
+        for task in self.tasks:
             if task.requirement_id not in requirement_ids:
                 raise ValueError(
                     f"Task {task.id} references unknown requirement {task.requirement_id}"
@@ -155,15 +155,15 @@ class Plan(BaseModel):
             if task.timeout_seconds <= 0:
                 raise ValueError(f"Task {task.id} must declare a positive timeout")
 
-        valid_task_ids: Set[str] = {task.id for task in model.tasks}
-        for task in model.tasks:
+        valid_task_ids: Set[str] = {task.id for task in self.tasks}
+        for task in self.tasks:
             dangling = [dep for dep in task.depends_on if dep not in valid_task_ids]
             if dangling:
                 raise ValueError(
                     f"Task {task.id} declares unknown dependencies: {', '.join(dangling)}"
                 )
 
-        return model
+        return self
 
     def requirement(self, requirement_id: str) -> Requirement:
         """Return the requirement with the given identifier."""
@@ -221,10 +221,10 @@ class EvidencePack(BaseModel):
     truncated: bool = Field(default=False)
 
     @model_validator(mode="after")
-    def _populate_token_count(cls, model: "EvidencePack") -> "EvidencePack":  # type: ignore[override]
-        if not model.token_count:
-            model.token_count = sum(item.token_estimate() for item in model.items)
-        return model
+    def _populate_token_count(self) -> "EvidencePack":
+        if not self.token_count:
+            self.token_count = sum(item.token_estimate() for item in self.items)
+        return self
 
     def citation_order(self) -> List[str]:
         """Return the order of evidence identifiers for the responder."""

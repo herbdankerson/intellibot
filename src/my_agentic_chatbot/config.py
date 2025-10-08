@@ -81,9 +81,6 @@ class Settings(BaseSettings):
     neo4j_password: Optional[str] = Field(default=None, alias="NEO4J_PASSWORD")
     neo4j_mcp_token: Optional[str] = Field(default=None, alias="NEO4J_MCP_TOKEN")
 
-    planner_model: str = Field(default="planner")
-    responder_model: str = Field(default="responder")
-    cheap_worker_model: str = Field(default="cheap-worker")
     litellm_base_url: str = Field(default="http://localhost:4000", alias="LITELLM_BASE_URL")
     litellm_timeout_seconds: float = Field(
         default=60.0, alias="LITELLM_TIMEOUT_SECONDS"
@@ -138,11 +135,13 @@ class Settings(BaseSettings):
 
     def model_aliases(self) -> Dict[str, str]:
         """Return a mapping of logical model roles to provider model identifiers."""
+        from .runtime_config import get_runtime_config
 
+        runtime_config = get_runtime_config()
         return {
-            "planner": self.planner_model,
-            "responder": self.responder_model,
-            "cheap-worker": self.cheap_worker_model,
+            "planner": runtime_config.active("active_planner_model").identifier,
+            "responder": runtime_config.active("active_responder_model").identifier,
+            "cheap-worker": runtime_config.active("active_worker_model").identifier,
         }
 
     def resolve_path(self, relative_path: str) -> Path:
@@ -171,17 +170,21 @@ class Settings(BaseSettings):
     def to_metadata(self) -> Dict[str, Any]:
         """Serialize non-sensitive settings for structured logging."""
 
+        from .runtime_config import get_runtime_config
+
         return {
             "database_url": self.database_url,
             "neo4j_uri": self.neo4j_uri,
-            "planner_model": self.planner_model,
-            "responder_model": self.responder_model,
             "prefect_api_url": self.prefect_api_url,
             "prefect_server_ephemeral_enabled": self.prefect_server_ephemeral_enabled,
             "prefect_server_ephemeral_startup_timeout_seconds": self.prefect_server_ephemeral_startup_timeout_seconds,
             "af_max_iterations": self.af_max_iterations,
             "acceptance_confidence_threshold": self.acceptance_confidence_threshold,
             "acceptance_min_sources": self.acceptance_min_sources,
+            "active_models": {
+                key: model.identifier
+                for key, model in get_runtime_config().active_models.items()
+            },
         }
 
 

@@ -78,6 +78,38 @@ services:
       - paradedb
       - openai-proxy
 
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_ORIGINS: "*"
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+      - ./ops/ollama/modelfiles:/modelfiles:ro
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      ENABLE_QWEN3_235B: "1"
+    volumes:
+      - ollama-data:/root/.ollama
+      - ./ops/ollama/modelfiles:/modelfiles:ro
+      - ./ops/ollama/init.sh:/init.sh:ro
+    entrypoint: ["/bin/sh", "/init.sh"]
+    restart: "no"
+
   api:
     build:
       context: .
@@ -309,6 +341,32 @@ services:
     volumes:
       - ./ops/cloudflared/openwebui.yml:/etc/cloudflared/config.yml:ro
 
+  tei-gte-large:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-0.7
+    environment:
+      - MODEL_ID=/models/gte-large-st
+    volumes:
+      - ./models:/models:ro
+    ports: ["6060:80"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  tei-legal:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-0.7
+    environment:
+      - MODEL_ID=/models/legal-bert-st
+    volumes:
+      - ./models:/models:ro
+    ports: ["6061:80"]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:80/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
 
 volumes:
   paradedb-data:
@@ -319,3 +377,4 @@ volumes:
   docling-cache:
   searxng-config:
   searxng-cache:
+  ollama-data:

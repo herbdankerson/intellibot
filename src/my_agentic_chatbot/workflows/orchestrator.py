@@ -11,6 +11,7 @@ from agent_framework import Executor, WorkflowBuilder, WorkflowContext, handler
 from ..agents import get_agent_config, iter_custom_agent_descriptors
 from ..agents.runtime import CustomAgentRunner
 from ..config import get_settings
+from ..runtime_config import get_runtime_config
 from ..constants import (
     ACCEPTANCE_BASE_MIN_SOURCES,
     ACCEPTANCE_CONFIDENCE_THRESHOLD,
@@ -872,13 +873,14 @@ class WorkflowOrchestrator:
         audit_agent: AuditAgent | None = None,
     ) -> None:
         settings = get_settings()
+        runtime_config = get_runtime_config()
         self.tools = ToolSuite(
             db=db_tool,
             graph=graph_tool,
             web=web_tool,
             custom_agents=custom_agents or self._build_custom_agents(),
         )
-        self.responder = responder or Responder(model_name=settings.responder_model)
+        self.responder = responder or Responder()
         self.approver = approver or AutoApprover()
         if audit_agent is None:
             try:
@@ -888,6 +890,7 @@ class WorkflowOrchestrator:
                 audit_agent = None
         self.audit_agent = audit_agent
         self.settings = settings
+        self.runtime_config = runtime_config
 
     def _build_custom_agents(self) -> Dict[str, CustomAgentRunner]:
         runners: Dict[str, CustomAgentRunner] = {}

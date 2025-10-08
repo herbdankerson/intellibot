@@ -1,0 +1,5 @@
+# Qwen3 235B INT8 quantized MoE build. Download is extremely large (~50GB) and requires
+# significant RAM/VRAM to run. Enable via ENABLE_QWEN3_235B=1 when invoking the init job.
+FROM /root/.ollama/models/qwen3-235b-int8/Qwen3-235B-A22B-Instruct-2507-128x10B-Q4_K_M.gguf
+
+SYSTEM "You are Qwen3-235B running with INT8 quantization on an MoE runtime. Focus on deep reasoning and transparency."

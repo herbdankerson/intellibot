@@ -16,20 +16,25 @@ from src.my_agentic_chatbot.llm_calls.llm_client import (
     LLMMessage,
     get_current_run_logger,
 )
+from src.my_agentic_chatbot.runtime_config import ModelConfig, get_runtime_config
 
 LOGGER = logging.getLogger(__name__)
-
-SUMMARIZER_MODEL = "cheap-worker"
-CLASSIFIER_MODEL = "cheap-worker"
-GENERAL_EMBED_MODEL = "emb-general"
-LEGAL_EMBED_MODEL = "emb-law"
-CODE_EMBED_MODEL = "emb-code"
 
 GEMINI_SUMMARY_BATCH = 8
 GENERAL_EMBED_BATCH = 32
 LEGAL_EMBED_BATCH = 32
 CODE_EMBED_BATCH = 16
 DEFAULT_RETRIES = 3
+
+
+def _active_model(key: str):
+    """Return the active model configuration for the supplied cfg.active key."""
+
+    return get_runtime_config().active(key)
+
+
+def _worker_identifier() -> str:
+    return _active_model("active_worker_model").identifier
 
 
 def _truncate_snippet(text: str, limit: int = 320) -> Tuple[str, bool]:
@@ -172,7 +177,7 @@ def summarize_with_gemini(text: str, *, max_length: int = 600) -> str:
     ]
     response_text = _invoke_chat(
         messages,
-        model=SUMMARIZER_MODEL,
+        model=_worker_identifier(),
         temperature=0.1,
         max_output_tokens=max_length,
     )
@@ -216,7 +221,7 @@ def summarize_chunks_with_gemini(texts: Sequence[str], *, max_length: int = 256)
         ]
         response_text = _invoke_chat(
             messages,
-            model=SUMMARIZER_MODEL,
+            model=_worker_identifier(),
             temperature=0.1,
             max_output_tokens=max_length,
         )
@@ -244,7 +249,7 @@ def classify_domain(text: str) -> ClassificationResult:
     ]
     response_text = _invoke_chat(
         messages,
-        model=CLASSIFIER_MODEL,
+        model=_worker_identifier(),
         temperature=0.0,
         max_output_tokens=256,
     )
@@ -270,19 +275,22 @@ def classify_domain(text: str) -> ClassificationResult:
 def embed_with_general(texts: Sequence[str]) -> List[List[float]]:
     """Create embeddings for general content using the local TEI backend."""
 
-    return _batched_embedding_request(texts, GENERAL_EMBED_MODEL, GENERAL_EMBED_BATCH)
+    model = _active_model("active_emb_general")
+    return _batched_embedding_request(texts, model=model, batch_size=GENERAL_EMBED_BATCH)
 
 
 def embed_with_legal(texts: Sequence[str]) -> List[List[float]]:
     """Create embeddings for legal content using the local TEI backend."""
 
-    return _batched_embedding_request(texts, LEGAL_EMBED_MODEL, LEGAL_EMBED_BATCH)
+    model = _active_model("active_emb_legal")
+    return _batched_embedding_request(texts, model=model, batch_size=LEGAL_EMBED_BATCH)
 
 
 def embed_with_code(texts: Sequence[str]) -> List[List[float]]:
     """Create embeddings for code content using the configured remote model."""
 
-    return _batched_embedding_request(texts, CODE_EMBED_MODEL, CODE_EMBED_BATCH)
+    model = _active_model("active_emb_code")
+    return _batched_embedding_request(texts, model=model, batch_size=CODE_EMBED_BATCH)
 
 
 def embed_with_gemini(texts: Sequence[str]) -> List[List[float]]:  # pragma: no cover - maintained for compatibility
@@ -295,11 +303,24 @@ def embed_with_voyage(texts: Sequence[str], *, model: str) -> List[List[float]]:
     """Backward compatible wrapper that routes to specialised embedding helpers."""
 
     canonical = model.lower()
-    if canonical in {"voyage-law-2", LEGAL_EMBED_MODEL}:
+    if canonical in {"voyage-law-2", _active_model("active_emb_legal").identifier}:
         return embed_with_legal(texts)
-    if canonical in {"voyage-code-3", CODE_EMBED_MODEL}:
+    if canonical in {"voyage-code-3", _active_model("active_emb_code").identifier}:
         return embed_with_code(texts)
-    return _batched_embedding_request(texts, model, CODE_EMBED_BATCH)
+    fallback = ModelConfig(
+        name=model,
+        provider="liteLLM",
+        identifier=model,
+        uri_template=None,
+        resolved_uri=None,
+        dims=None,
+        purpose="embedding",
+        enabled=True,
+        version=None,
+        notes=None,
+        config={},
+    )
+    return _batched_embedding_request(texts, model=fallback, batch_size=CODE_EMBED_BATCH)
 
 
 # ---------------------------------------------------------------------------
@@ -346,15 +367,18 @@ def _invoke_chat(
 
 def _batched_embedding_request(
     texts: Sequence[str],
-    model: str,
+    *,
+    model: ModelConfig,
     batch_size: int,
 ) -> List[List[float]]:
     vectors: List[List[float]] = []
+    model_identifier = model.identifier
+    model_name = model.name
     for batch in _batched(list(texts), batch_size):
         last_error: Optional[Exception] = None
         for attempt in range(1, DEFAULT_RETRIES + 1):
             try:
-                response = embedding(model=model, input=batch)
+                response = embedding(model=model_identifier, input=batch)
                 data = response.get("data") if isinstance(response, dict) else []
                 if len(data) != len(batch):
                     raise RuntimeError("Embedding count mismatch")
@@ -363,9 +387,10 @@ def _batched_embedding_request(
             except Exception as exc:  # pragma: no cover - exercised via mocks
                 last_error = exc
                 LOGGER.warning(
-                    "Embedding request attempt %s failed for model %s: %s",
+                    "Embedding request attempt %s failed for model %s (%s): %s",
                     attempt,
-                    model,
+                    model_name,
+                    model_identifier,
                     exc,
                 )
         else:
@@ -417,9 +442,6 @@ def _parse_summary_array(
 __all__ = [
     "ClassificationResult",
     "classify_domain",
-    "GENERAL_EMBED_MODEL",
-    "LEGAL_EMBED_MODEL",
-    "CODE_EMBED_MODEL",
     "embed_with_general",
     "embed_with_legal",
     "embed_with_code",

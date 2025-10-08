@@ -18,6 +18,7 @@ import markdownify
 from etl.tasks.model_clients import embed_with_general, summarize_with_gemini
 
 from ..config import MCPServerConfig, get_settings
+from ..runtime_config import get_runtime_config, get_tool_config
 from ..ingestion.web_ingest import ingest_web_capture
 from ..mcp_client.mcp_client import MCPClient, MCPToolResponse
 from ..schemas import EvidenceItem, Finding, PlanTask, Requirement
@@ -158,9 +159,13 @@ class WebTool:
         guidance: Optional[SequentialGuidance] = None,
     ) -> None:
         settings = get_settings()
-        self.searx_base_url = settings.searxng_internal_url.rstrip("/") if settings.searxng_internal_url else None
+        toolbox_cfg = get_tool_config("search-toolbox")
+        if not toolbox_cfg.resolved_endpoint:
+            raise RuntimeError("search-toolbox endpoint is not configured")
+        self.searx_base_url = toolbox_cfg.resolved_endpoint.rstrip("/")
+        timeout_override = toolbox_cfg.timeout_s or settings.ingest_http_timeout_seconds
         self.work_table = work_table or WebWorkTable()
-        self.fetch_client = fetch_client or FetchClient()
+        self.fetch_client = fetch_client or FetchClient(timeout=timeout_override)
         self.sequential_tool = sequential_tool
         self.guidance = guidance or SequentialGuidance()
         self.client = client
@@ -206,6 +211,22 @@ class WebTool:
     ) -> ToolOutcome:
         limit = limit or self.max_results
         context = self._context_from_task(task)
+        runtime_config = get_runtime_config()
+        spaces_used, dims_by_space, domain_hint = self._resolve_search_spaces(
+            task, requirement, runtime_config
+        )
+        k_per_space = {space: limit for space in spaces_used}
+        LOGGER.info(
+            "search toolbox resolved embedding spaces",
+            extra={
+                "run_id": context.run_id,
+                "requirement_id": requirement.id,
+                "spaces_used": spaces_used,
+                "dimensions": dims_by_space,
+                "domain_hint": domain_hint,
+                "k_per_space": k_per_space,
+            },
+        )
         base_query = str(task.inputs.get("query") or requirement.question or task.description)
         if not base_query.strip():
             return ToolOutcome(notes=["web search skipped: empty query"])
@@ -444,6 +465,36 @@ class WebTool:
             if url and url in target_urls:
                 prioritized.append((record_id, candidate))
         return prioritized
+
+    def _resolve_search_spaces(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+        runtime_config,
+    ) -> Tuple[List[str], Dict[str, int], str]:
+        general_model = runtime_config.active("active_emb_general")
+        spaces = [general_model.name]
+        dims = {general_model.name: general_model.require_dims()}
+        domain_hint = self._domain_hint(task, requirement)
+        if domain_hint == "legal":
+            legal_model = runtime_config.active("active_emb_legal")
+            spaces.append(legal_model.name)
+            dims[legal_model.name] = legal_model.require_dims()
+        elif domain_hint == "code":
+            code_model = runtime_config.active("active_emb_code")
+            spaces.append(code_model.name)
+            dims[code_model.name] = code_model.require_dims()
+        return sorted(spaces), dims, domain_hint
+
+    def _domain_hint(self, task: PlanTask, requirement: Requirement) -> str:
+        for source in (task.metadata, requirement.metadata, task.inputs):
+            if isinstance(source, dict):
+                raw = source.get("domain")
+                if isinstance(raw, str) and raw.strip():
+                    lowered = raw.strip().lower()
+                    if lowered in {"legal", "code", "general"}:
+                        return lowered
+        return "general"
 
     def _required_sources(self, requirement: Requirement) -> int:
         metadata_min = requirement.metadata.get("min_sources") if requirement.metadata else None

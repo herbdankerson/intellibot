@@ -13,14 +13,113 @@ sys.modules.setdefault("litellm", litellm_stub)
 
 from etl.tasks import intake_models
 from etl.tasks import intake_tasks
+from etl.tasks import model_clients
 from etl.tasks.model_clients import (
-    CODE_EMBED_MODEL,
-    GENERAL_EMBED_MODEL,
-    SUMMARIZER_MODEL,
     embed_with_code,
     embed_with_general,
     summarize_chunks_with_gemini,
 )
+from src.my_agentic_chatbot.runtime_config import ToolConfig
+
+
+class StubModelConfig:
+    def __init__(
+        self,
+        name: str,
+        identifier: str,
+        *,
+        dims: int | None,
+        provider: str = "test",
+        purpose: str = "embedding",
+    ) -> None:
+        self.name = name
+        self.identifier = identifier
+        self.uri_template = None
+        self.resolved_uri = None
+        self.dims = dims
+        self.provider = provider
+        self.purpose = purpose
+        self.enabled = True
+        self.version = "test"
+        self.notes = None
+        self.config: dict[str, object] = {}
+
+    def require_dims(self) -> int:
+        if self.dims is None:
+            raise RuntimeError(f"Model {self.name} missing dims in test stub")
+        return self.dims
+
+
+class StubRuntimeConfig:
+    def __init__(
+        self,
+        models: dict[str, StubModelConfig],
+        active_models: dict[str, StubModelConfig],
+        tools: dict[str, ToolConfig] | None = None,
+    ):
+        self.models = models
+        self.active_models = active_models
+        self.tools = tools or {}
+
+    def model(self, name: str) -> StubModelConfig:
+        return self.models[name]
+
+    def active(self, key: str) -> StubModelConfig:
+        return self.active_models[key]
+
+
+@pytest.fixture(autouse=True)
+def runtime_config_stub(monkeypatch):
+    general = StubModelConfig("emb-general", "emb-general", dims=2)
+    legal = StubModelConfig("emb-legal", "emb-legal", dims=2)
+    code = StubModelConfig("emb-code", "emb-code", dims=3)
+    worker = StubModelConfig("worker-local-smollm", "cheap-worker", dims=None, purpose="chat")
+    planner = StubModelConfig("planner-local-smollm", "planner", dims=None, purpose="chat")
+    responder = StubModelConfig("responder-local-smollm", "responder", dims=None, purpose="chat")
+
+    models = {
+        cfg.name: cfg
+        for cfg in [general, legal, code, worker, planner, responder]
+    }
+    active_models = {
+        "active_emb_general": general,
+        "active_emb_legal": legal,
+        "active_emb_code": code,
+        "active_worker_model": worker,
+        "active_planner_model": planner,
+        "active_responder_model": responder,
+    }
+    toolbox = ToolConfig(
+        name="search-toolbox",
+        type="http",
+        endpoint_template="http://toolbox",
+        resolved_endpoint="http://toolbox",
+        method="POST",
+        auth_ref=None,
+        timeout_s=10,
+        config={},
+        enabled=True,
+    )
+    docling_tool = ToolConfig(
+        name="docling",
+        type="http",
+        endpoint_template="http://docling",
+        resolved_endpoint="http://docling",
+        method="POST",
+        auth_ref=None,
+        timeout_s=20,
+        config={},
+        enabled=True,
+    )
+    stub = StubRuntimeConfig(
+        models=models,
+        active_models=active_models,
+        tools={toolbox.name: toolbox, docling_tool.name: docling_tool},
+    )
+    monkeypatch.setattr(intake_tasks, "get_runtime_config", lambda: stub)
+    monkeypatch.setattr(model_clients, "get_runtime_config", lambda: stub)
+    monkeypatch.setattr("src.my_agentic_chatbot.runtime_config.get_runtime_config", lambda: stub)
+    return stub
 
 
 class DummyResult:
@@ -71,7 +170,7 @@ class DummyEngine:
         return DummyConnectionContext(self)
 
 
-def test_summarize_chunks_with_gemini_parses_batch(monkeypatch):
+def test_summarize_chunks_with_gemini_parses_batch(monkeypatch, runtime_config_stub):
     records = []
 
     def fake_completion(**kwargs):
@@ -84,10 +183,13 @@ def test_summarize_chunks_with_gemini_parses_batch(monkeypatch):
 
     assert result == ["A", "B"]
     assert len(records) == 1
-    assert records[0]["model"] == SUMMARIZER_MODEL
+    assert (
+        records[0]["model"]
+        == runtime_config_stub.active("active_worker_model").identifier
+    )
 
 
-def test_embed_with_code_uses_litellm_embedding(monkeypatch):
+def test_embed_with_code_uses_litellm_embedding(monkeypatch, runtime_config_stub):
     calls = []
 
     def fake_embedding(**kwargs):
@@ -100,7 +202,7 @@ def test_embed_with_code_uses_litellm_embedding(monkeypatch):
 
     assert vectors == [[0.1, 0.2, 0.3]]
     assert calls[0]["input"] == ["hello"]
-    assert calls[0]["model"] == CODE_EMBED_MODEL
+    assert calls[0]["model"] == runtime_config_stub.active("active_emb_code").identifier
 
 
 def test_acquire_source_fetches_remote(monkeypatch):
@@ -147,7 +249,7 @@ def test_docling_normalize_uses_conversion(monkeypatch):
     assert normalized.metadata["language"] == "en"
 
 
-def test_persist_results_updates_ingest_item(monkeypatch):
+def test_persist_results_updates_ingest_item(monkeypatch, runtime_config_stub):
     engine = DummyEngine()
     monkeypatch.setattr(intake_tasks, "get_engine", lambda *args, **kwargs: engine)
 
@@ -181,10 +283,11 @@ def test_persist_results_updates_ingest_item(monkeypatch):
         ner_entities=[],
         summary="Chunk summary",
     )
+    general_model = runtime_config_stub.active("active_emb_general")
     embedding = intake_models.ChunkEmbedding(
         chunk_id=chunk.id,
-        space="emb-general",
-        model=GENERAL_EMBED_MODEL,
+        space=general_model.name,
+        model=general_model.identifier,
         vector=[0.1, 0.2],
     )
 
@@ -197,7 +300,7 @@ def test_persist_results_updates_ingest_item(monkeypatch):
     )
 
     assert report.chunk_count == 1
-    assert report.embedding_spaces == ["emb-general"]
+    assert report.embedding_spaces == [general_model.name]
     assert report.job_id == str(ingest_item.job_id)
     assert any("UPDATE kb.ingest_items" in stmt for stmt, _ in engine.statements)
     assert "chunk_abstractions" in report.ingest_item.metadata

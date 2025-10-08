@@ -18,7 +18,11 @@ from typing import Dict, List, Optional, Sequence
 from uuid import uuid4
 
 import httpx
-from prefect import task
+try:
+    from prefect import task
+except ModuleNotFoundError:  # pragma: no cover - prefect optional for tests
+    def task(function):
+        return function
 from sqlalchemy import text
 
 from .intake_models import (
@@ -32,9 +36,6 @@ from .intake_models import (
 )
 from . import chunker
 from .model_clients import (
-    CODE_EMBED_MODEL,
-    GENERAL_EMBED_MODEL,
-    LEGAL_EMBED_MODEL,
     ClassificationResult,
     classify_domain,
     embed_with_code,
@@ -45,6 +46,11 @@ from .model_clients import (
 )
 from .ner import extract_ner_tags
 from src.my_agentic_chatbot.config import get_settings
+from src.my_agentic_chatbot.runtime_config import (
+    ModelConfig,
+    get_runtime_config,
+    get_tool_config,
+)
 from src.my_agentic_chatbot.storage.db import get_engine
 from urllib.parse import urlparse
 
@@ -137,6 +143,12 @@ def docling_normalize(source: AcquiredSource) -> NormalizedDocument:
     """Normalize source bytes via Docling, falling back to raw decoding on failure."""
 
     settings = get_settings()
+    docling_tool = get_tool_config("docling")
+    if not docling_tool.resolved_endpoint:
+        raise RuntimeError("docling endpoint is not configured")
+    base_url = docling_tool.resolved_endpoint
+    timeout_seconds = float(docling_tool.timeout_s or settings.docling_timeout_seconds)
+    poll_interval = settings.docling_poll_interval_seconds
     filename = str(source.metadata.get("filename") or "document")
     content_type = str(source.metadata.get("content_type") or "application/octet-stream")
 
@@ -145,9 +157,9 @@ def docling_normalize(source: AcquiredSource) -> NormalizedDocument:
             source.content,
             filename=filename,
             content_type=content_type,
-            timeout=settings.docling_timeout_seconds,
-            poll_interval=settings.docling_poll_interval_seconds,
-            base_url=settings.docling_base_url,
+            timeout=timeout_seconds,
+            poll_interval=poll_interval,
+            base_url=base_url,
         )
         text = plain_text or _markdown_to_text(markdown)
         metadata: Dict[str, object] = {
@@ -301,40 +313,52 @@ def embed_chunks(item: IngestItem, chunks: List[Chunk]) -> List[ChunkEmbedding]:
 
     embeddings: List[ChunkEmbedding] = []
     texts = [chunk.text for chunk in chunks]
+    runtime_config = get_runtime_config()
+    general_model = runtime_config.active("active_emb_general")
+    legal_model = runtime_config.active("active_emb_legal")
+    code_model = runtime_config.active("active_emb_code")
+
     general_vectors = embed_with_general(texts)
     for vector, chunk in zip(general_vectors, chunks):
         embeddings.append(
-                ChunkEmbedding(
-                    chunk_id=chunk.id,
-                    space="emb-general",
-                    model=GENERAL_EMBED_MODEL,
-                    vector=vector,
-                )
+            ChunkEmbedding(
+                chunk_id=chunk.id,
+                space=general_model.name,
+                model=general_model.identifier,
+                vector=vector,
+            )
         )
 
-    if (item.domain or "general") == "legal":
+    domain_key = (item.domain or "general").lower()
+    if domain_key == "legal":
         legal_vectors = embed_with_legal(texts)
         for vector, chunk in zip(legal_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="emb-law",
-                    model=LEGAL_EMBED_MODEL,
+                    space=legal_model.name,
+                    model=legal_model.identifier,
                     vector=vector,
                 )
             )
-    elif (item.domain or "general") == "code":
+    elif domain_key == "code":
         code_vectors = embed_with_code(texts)
         for vector, chunk in zip(code_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="emb-code",
-                    model=CODE_EMBED_MODEL,
+                    space=code_model.name,
+                    model=code_model.identifier,
                     vector=vector,
                 )
             )
-    LOGGER.debug("Generated %d embedding payload(s) for %s", len(embeddings), item.id)
+    LOGGER.info(
+        "ingest chunk embeddings prepared",
+        extra={
+            "ingest_item_id": str(item.id),
+            "spaces_used": sorted({embedding.space for embedding in embeddings}),
+        },
+    )
     return embeddings
 
 
@@ -349,6 +373,8 @@ def persist_results(
     """Persist the enriched document, chunks, and embeddings into ParadeDB."""
 
     engine = get_engine()
+    runtime_config = get_runtime_config()
+    general_model = runtime_config.active("active_emb_general")
     source_meta = document.metadata.get("source", {}) if isinstance(document.metadata, dict) else {}
     docling_meta = document.metadata.get("docling") if isinstance(document.metadata, dict) else None
     language = str(document.metadata.get("language", "und")) if isinstance(document.metadata, dict) else "und"
@@ -481,13 +507,24 @@ def persist_results(
         for embedding_payload in embeddings:
             space_id = embedding_spaces.get(embedding_payload.space)
             if space_id is None:
-                space_id = _ensure_embedding_space(
-                    conn,
-                    embedding_payload.space,
-                    embedding_payload.model,
-                    len(embedding_payload.vector),
-                )
-                embedding_spaces[embedding_payload.space] = space_id
+                model_cfg = runtime_config.model(embedding_payload.space)
+                expected_dims = model_cfg.require_dims()
+                actual_dims = len(embedding_payload.vector)
+                if actual_dims != expected_dims:
+                    LOGGER.warning(
+                        "Embedding dimensionality mismatch",
+                        extra={
+                            "space": embedding_payload.space,
+                            "expected": expected_dims,
+                            "actual": actual_dims,
+                        },
+                    )
+                space_id = _ensure_embedding_space(conn, model_cfg)
+                _ensure_hnsw_index(conn, space_id, model_cfg.name)
+                embedding_spaces[model_cfg.name] = space_id
+            else:
+                model_cfg = runtime_config.model(embedding_payload.space)
+                embedding_spaces.setdefault(model_cfg.name, space_id)
             vector_literal = _vector_literal(embedding_payload.vector)
             vector_payloads.append(
                 {
@@ -512,15 +549,11 @@ def persist_results(
             )
 
         if document_vector:
-            general_space_id = embedding_spaces.get("emb-general")
+            general_space_id = embedding_spaces.get(general_model.name)
             if general_space_id is None:
-                general_space_id = _ensure_embedding_space(
-                    conn,
-                    "emb-general",
-                    GENERAL_EMBED_MODEL,
-                    len(document_vector),
-                )
-                embedding_spaces["emb-general"] = general_space_id
+                general_space_id = _ensure_embedding_space(conn, general_model)
+                _ensure_hnsw_index(conn, general_space_id, general_model.name)
+                embedding_spaces[general_model.name] = general_space_id
             conn.execute(
                 text(
                     """
@@ -998,26 +1031,14 @@ def _strip_html(raw_html: str) -> str:
 
 
 
-def _ensure_embedding_space(
-    conn,
-    name: str,
-    model: str,
-    dims: int,
-) -> int:
+def _ensure_embedding_space(conn, model_cfg: ModelConfig) -> int:
     existing = conn.execute(
         text("SELECT id FROM kb.embedding_spaces WHERE name = :name"),
-        {"name": name},
+        {"name": model_cfg.name},
     ).fetchone()
     if existing:
         return existing[0]
 
-    if name in {"emb-general", "emb-law"}:
-        provider = "local-tei"
-    elif name == "emb-code" or "gemini" in model:
-        provider = "google-gemini"
-    else:
-        provider = "voyage"
-    distance = "cosine"
     result = conn.execute(
         text(
             """
@@ -1027,14 +1048,42 @@ def _ensure_embedding_space(
             """
         ),
         {
-            "name": name,
-            "model": model,
-            "provider": provider,
-            "dims": dims,
-            "distance_metric": distance,
+            "name": model_cfg.name,
+            "model": model_cfg.identifier,
+            "provider": model_cfg.provider,
+            "dims": model_cfg.require_dims(),
+            "distance_metric": model_cfg.config.get("distance_metric", "cosine"),
         },
     )
     return result.scalar_one()
+
+
+def _ensure_hnsw_index(conn, space_id: int, space_name: str) -> None:
+    index_safe = re.sub(r"[^a-z0-9_]+", "_", space_name.lower())
+    chunk_index = f"idx_chunk_embeddings_{index_safe}"
+    conn.execute(
+        text(
+            f"""
+            CREATE INDEX IF NOT EXISTS {chunk_index}
+            ON kb.chunk_embeddings USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 200)
+            WHERE space_id = :space_id
+            """
+        ),
+        {"space_id": space_id},
+    )
+    document_index = f"idx_document_embeddings_{index_safe}"
+    conn.execute(
+        text(
+            f"""
+            CREATE INDEX IF NOT EXISTS {document_index}
+            ON kb.document_embeddings USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 200)
+            WHERE space_id = :space_id
+            """
+        ),
+        {"space_id": space_id},
+    )
 
 
 def _vector_literal(values: Sequence[float]) -> str:

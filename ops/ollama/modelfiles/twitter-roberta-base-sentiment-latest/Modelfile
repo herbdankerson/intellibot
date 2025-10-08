@@ -1,0 +1,19 @@
+FROM smollm2:1.7b
+
+SYSTEM "You emulate cardiffnlp/twitter-roberta-base-sentiment-latest for tweet sentiment analysis. Respond strictly with JSON {\"sentiment\":\"positive|negative|neutral\",\"confidence\":<0-1 float>}."
+
+TEMPLATE """
+Classify the tweet sentiment.
+Example 1:
+Tweet: This feature saved me hours today!
+Output: {\"sentiment\":\"positive\",\"confidence\":0.91}
+
+Example 2:
+Tweet: The service outage ruined my evening.
+Output: {\"sentiment\":\"negative\",\"confidence\":0.89}
+
+Tweet: {{ .Prompt }}
+Output:
+"""
+
+PARAMETER temperature 0

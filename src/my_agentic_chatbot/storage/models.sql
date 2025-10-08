@@ -83,6 +83,121 @@ CREATE TABLE IF NOT EXISTS kb.document_embeddings (
     PRIMARY KEY (document_id, space_id)
 );
 
+CREATE SCHEMA IF NOT EXISTS cfg;
+
+CREATE TABLE IF NOT EXISTS cfg.models (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    provider TEXT NOT NULL,
+    identifier TEXT NOT NULL,
+    uri_template TEXT,
+    dims INTEGER,
+    purpose TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    version TEXT,
+    notes TEXT,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cfg.tools (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    type TEXT NOT NULL,
+    endpoint_template TEXT NOT NULL,
+    method TEXT NOT NULL DEFAULT 'POST',
+    auth_ref TEXT,
+    timeout_s INTEGER,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cfg.policies (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT,
+    rules JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cfg.prompts (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    content TEXT NOT NULL,
+    version TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cfg.agents (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    model_name TEXT,
+    tool_allow TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cfg.active (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO cfg.models (name, provider, identifier, uri_template, dims, purpose, version, notes)
+VALUES
+    ('planner-local-smollm', 'litellm', 'planner', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Local planner routed through LiteLLM'),
+    ('responder-local-smollm', 'litellm', 'responder', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Local responder routed through LiteLLM'),
+    ('worker-local-smollm', 'litellm', 'cheap-worker', '${LITELLM_BASE_URL}', NULL, 'chat', '1', 'Lightweight worker for summaries and classification'),
+    ('emb-general', 'litellm', 'emb-general', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'General embeddings via TEI GTE-large'),
+    ('emb-legal', 'litellm', 'emb-legal', '${LITELLM_BASE_URL}', 768, 'embedding', '1', 'Legal embeddings via TEI Legal-BERT'),
+    ('emb-code', 'litellm', 'emb-code', '${LITELLM_BASE_URL}', 1024, 'embedding', '1', 'Code embeddings alias (defaults to general)')
+ON CONFLICT (name) DO UPDATE
+SET
+    provider = EXCLUDED.provider,
+    identifier = EXCLUDED.identifier,
+    uri_template = EXCLUDED.uri_template,
+    dims = EXCLUDED.dims,
+    purpose = EXCLUDED.purpose,
+    version = EXCLUDED.version,
+    notes = EXCLUDED.notes,
+    updated_at = NOW();
+
+INSERT INTO cfg.active (key, value)
+VALUES
+    ('active_planner_model', 'planner-local-smollm'),
+    ('active_responder_model', 'responder-local-smollm'),
+    ('active_worker_model', 'worker-local-smollm'),
+    ('active_emb_general', 'emb-general'),
+    ('active_emb_legal', 'emb-legal'),
+    ('active_emb_code', 'emb-code')
+ON CONFLICT (key) DO UPDATE
+SET
+    value = EXCLUDED.value,
+    updated_at = NOW();
+
+INSERT INTO cfg.tools (name, type, endpoint_template, method, auth_ref, timeout_s, config)
+VALUES
+    ('search-toolbox', 'http', '${SEARCH_TOOLBOX_BASE_URL}', 'POST', NULL, 15, '{}'::jsonb),
+    ('docling', 'http', '${DOCLING_BASE_URL}', 'POST', NULL, 120, '{}'::jsonb)
+ON CONFLICT (name) DO UPDATE
+SET
+    type = EXCLUDED.type,
+    endpoint_template = EXCLUDED.endpoint_template,
+    method = EXCLUDED.method,
+    auth_ref = EXCLUDED.auth_ref,
+    timeout_s = EXCLUDED.timeout_s,
+    config = EXCLUDED.config,
+    updated_at = NOW();
+
 CREATE SCHEMA IF NOT EXISTS agent;
 
 CREATE TABLE IF NOT EXISTS agent.runs (

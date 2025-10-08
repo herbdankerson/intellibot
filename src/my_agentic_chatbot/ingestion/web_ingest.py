@@ -17,9 +17,6 @@ from etl.tasks.intake_tasks import (
     persist_results,
 )
 from etl.tasks.model_clients import (
-    CODE_EMBED_MODEL,
-    GENERAL_EMBED_MODEL,
-    LEGAL_EMBED_MODEL,
     embed_with_code,
     embed_with_general,
     embed_with_legal,
@@ -28,6 +25,7 @@ from etl.tasks.model_clients import (
 )
 
 from ..storage.db import get_engine
+from ..runtime_config import get_runtime_config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +157,12 @@ def ingest_web_capture(
 
     embeddings: List[ChunkEmbedding] = []
     if chunk_texts:
+        runtime_config = get_runtime_config()
+        general_model = runtime_config.active("active_emb_general")
+        legal_model = runtime_config.active("active_emb_legal")
+        code_model = runtime_config.active("active_emb_code")
+        spaces_used = {general_model.name}
+        dims_by_space = {general_model.name: general_model.require_dims()}
         general_vectors: List[List[float]] = []
         try:
             general_vectors = embed_with_general(chunk_texts)
@@ -177,8 +181,8 @@ def ingest_web_capture(
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="emb-general",
-                    model=GENERAL_EMBED_MODEL,
+                    space=general_model.name,
+                    model=general_model.identifier,
                     vector=vector,
                 )
             )
@@ -201,11 +205,13 @@ def ingest_web_capture(
                 embeddings.append(
                     ChunkEmbedding(
                         chunk_id=chunk.id,
-                        space="emb-law",
-                        model=LEGAL_EMBED_MODEL,
+                        space=legal_model.name,
+                        model=legal_model.identifier,
                         vector=vector,
                     )
                 )
+            spaces_used.add(legal_model.name)
+            dims_by_space[legal_model.name] = legal_model.require_dims()
         elif domain_key == "code":
             try:
                 code_vectors = embed_with_code(chunk_texts)
@@ -223,11 +229,22 @@ def ingest_web_capture(
                 embeddings.append(
                     ChunkEmbedding(
                         chunk_id=chunk.id,
-                        space="emb-code",
-                        model=CODE_EMBED_MODEL,
+                        space=code_model.name,
+                        model=code_model.identifier,
                         vector=vector,
                     )
                 )
+            spaces_used.add(code_model.name)
+            dims_by_space[code_model.name] = code_model.require_dims()
+
+        LOGGER.info(
+            "web capture embeddings generated",
+            extra={
+                "ingest_item_id": str(item.id),
+                "spaces_used": sorted(spaces_used),
+                "dimensions": dims_by_space,
+            },
+        )
 
     abstractions = _build_abstractions(chunks)
     report = persist_results.fn(item, document, chunks, embeddings, abstractions)

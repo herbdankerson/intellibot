@@ -17,9 +17,6 @@ from etl.tasks.intake_models import (
     new_ingest_item,
 )
 from etl.tasks.model_clients import (
-    CODE_EMBED_MODEL,
-    GENERAL_EMBED_MODEL,
-    LEGAL_EMBED_MODEL,
     embed_with_code,
     embed_with_general,
     embed_with_legal,
@@ -30,6 +27,7 @@ from etl.tasks.intake_tasks import persist_results
 
 from .schemas import AgentResponse, EvidencePack, Plan
 from .storage.db import get_engine
+from .runtime_config import get_runtime_config
 
 LOGGER = logging.getLogger(__name__)
 
@@ -202,17 +200,24 @@ def _estimate_tokens(text: str) -> int:
 def _build_embeddings(item: IngestItem, chunks: List[Chunk], *, domain: str) -> List[ChunkEmbedding]:
     texts = [chunk.text for chunk in chunks]
     embeddings: List[ChunkEmbedding] = []
+    runtime_config = get_runtime_config()
+    general_model = runtime_config.active("active_emb_general")
+    legal_model = runtime_config.active("active_emb_legal")
+    code_model = runtime_config.active("active_emb_code")
 
     general_vectors = embed_with_general(texts)
     for vector, chunk in zip(general_vectors, chunks):
         embeddings.append(
             ChunkEmbedding(
                 chunk_id=chunk.id,
-                space="emb-general",
-                model=GENERAL_EMBED_MODEL,
+                space=general_model.name,
+                model=general_model.identifier,
                 vector=vector,
             )
         )
+
+    spaces_used = {general_model.name}
+    dims_by_space = {general_model.name: general_model.require_dims()}
 
     domain_key = (item.domain or domain or "general").lower()
     if domain_key == "legal":
@@ -221,22 +226,35 @@ def _build_embeddings(item: IngestItem, chunks: List[Chunk], *, domain: str) -> 
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="emb-law",
-                    model=LEGAL_EMBED_MODEL,
+                    space=legal_model.name,
+                    model=legal_model.identifier,
                     vector=vector,
                 )
             )
+        spaces_used.add(legal_model.name)
+        dims_by_space[legal_model.name] = legal_model.require_dims()
     elif domain_key == "code":
         code_vectors = embed_with_code(texts)
         for vector, chunk in zip(code_vectors, chunks):
             embeddings.append(
                 ChunkEmbedding(
                     chunk_id=chunk.id,
-                    space="emb-code",
-                    model=CODE_EMBED_MODEL,
+                    space=code_model.name,
+                    model=code_model.identifier,
                     vector=vector,
                 )
             )
+        spaces_used.add(code_model.name)
+        dims_by_space[code_model.name] = code_model.require_dims()
+
+    LOGGER.info(
+        "chat embeddings generated",
+        extra={
+            "ingest_item_id": str(item.id),
+            "spaces_used": sorted(spaces_used),
+            "dimensions": dims_by_space,
+        },
+    )
 
     return embeddings
 

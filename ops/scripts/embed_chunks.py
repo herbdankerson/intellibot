@@ -13,34 +13,11 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(BASE_DIR))
 
 from src.my_agentic_chatbot.config import get_settings
+from src.my_agentic_chatbot.runtime_config import ModelConfig, get_runtime_config
 from src.my_agentic_chatbot.storage.db import get_engine
 
-SPACE_CONFIG: dict[str, dict[str, Any]] = {
-    "emb-general": {
-        "model": "thenlper/gte-large",
-        "provider": "local-tei",
-        "dims": 1024,
-        "distance_metric": "cosine",
-    },
-    "emb-law": {
-        "model": "nlpaueb/legal-bert-base-uncased",
-        "provider": "local-tei",
-        "dims": 768,
-        "distance_metric": "cosine",
-    },
-    "emb-code": {
-        "model": "gemini/embedding-001",
-        "provider": "google-gemini",
-        "dims": 768,
-        "distance_metric": "cosine",
-    },
-}
 
-EMBEDDING_SPACES = tuple(SPACE_CONFIG.keys())
-
-
-def ensure_space(space_name: str) -> int:
-    config = SPACE_CONFIG[space_name]
+def ensure_space(model_cfg: ModelConfig) -> int:
     engine = get_engine()
     with engine.begin() as connection:
         result = connection.execute(
@@ -57,11 +34,11 @@ def ensure_space(space_name: str) -> int:
                 """
             ),
             {
-                "name": space_name,
-                "model": config["model"],
-                "provider": config["provider"],
-                "dims": config["dims"],
-                "distance_metric": config["distance_metric"],
+                "name": model_cfg.name,
+                "model": model_cfg.identifier,
+                "provider": model_cfg.provider,
+                "dims": model_cfg.require_dims(),
+                "distance_metric": model_cfg.config.get("distance_metric", "cosine"),
             },
         )
         return result.scalar_one()
@@ -123,12 +100,25 @@ def insert_embeddings(space_id: int, rows: List[dict[str, Any]], vectors: List[L
 
 
 def main() -> None:
+    runtime_config = get_runtime_config()
+    embedding_models = [
+        model
+        for model in runtime_config.models.values()
+        if model.purpose == "embedding" and model.enabled
+    ]
+    if not embedding_models:
+        raise RuntimeError("No embedding models registered in cfg.models")
+
+    space_choices = sorted(model.name for model in embedding_models)
+    default_space = runtime_config.active("active_emb_general").name
+
     parser = argparse.ArgumentParser(description="Embed knowledge base chunks")
-    parser.add_argument("--space", choices=EMBEDDING_SPACES, default="emb-general")
+    parser.add_argument("--space", choices=space_choices, default=default_space)
     parser.add_argument("--batch-size", type=int, default=32)
     args = parser.parse_args()
 
-    space_id = ensure_space(args.space)
+    target_model = runtime_config.model(args.space)
+    space_id = ensure_space(target_model)
     settings = get_settings()
     total = 0
     with httpx.Client(
@@ -140,7 +130,7 @@ def main() -> None:
             rows = fetch_pending_chunks(space_id, args.batch_size)
             if not rows:
                 break
-            vectors = embed_texts(client, args.space, [row["text"] for row in rows])
+            vectors = embed_texts(client, target_model.identifier, [row["text"] for row in rows])
             if len(vectors) != len(rows):
                 raise RuntimeError("Embedding response count does not match request")
             insert_embeddings(space_id, rows, vectors)
@@ -148,9 +138,9 @@ def main() -> None:
             print(f"Embedded {len(rows)} chunks; total={total}")
 
     if total == 0:
-        print(f"No new chunks to embed for space '{args.space}'.")
+        print(f"No new chunks to embed for space '{target_model.name}'.")
     else:
-        print(f"Embedded {total} chunks into space '{args.space}'.")
+        print(f"Embedded {total} chunks into space '{target_model.name}'.")
 
 
 if __name__ == "__main__":

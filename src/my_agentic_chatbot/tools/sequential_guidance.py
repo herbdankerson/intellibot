@@ -37,7 +37,10 @@ class SequentialGuidance:
 
     def __init__(self, *, model: str | None = None, max_queries: int = 3) -> None:
         settings = get_settings()
-        self.model = model or settings.cheap_worker_model
+        from ..runtime_config import get_runtime_config
+
+        default_model = get_runtime_config().active("active_worker_model").identifier
+        self.model = model or default_model
         self.max_queries = max_queries
 
     def analyse(

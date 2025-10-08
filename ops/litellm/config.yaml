@@ -7,188 +7,99 @@ router_settings:
 model_list:
   - model_name: planner
     litellm_params:
-      model: gemini/gemini-2.5-pro
+      model: smollm2:1.7b
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
       temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_1
-  - model_name: planner
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_2
-  - model_name: planner
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_3
-  - model_name: planner
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_4
-  - model_name: planner
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: responder
     litellm_params:
-      model: gemini/gemini-2.5-pro
+      model: smollm2:1.7b
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
       temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_1
-  - model_name: responder
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_2
-  - model_name: responder
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_3
-  - model_name: responder
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_4
-  - model_name: responder
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      temperature: 0
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: cheap-worker
     litellm_params:
-      model: gemini/gemini-2.5-flash
+      model: smollm2:1.7b
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
       temperature: 0.2
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_1
-  - model_name: cheap-worker
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      temperature: 0.2
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_2
-  - model_name: cheap-worker
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      temperature: 0.2
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_3
-  - model_name: cheap-worker
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      temperature: 0.2
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_4
-  - model_name: cheap-worker
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      temperature: 0.2
-      max_output_tokens: 65536
-      api_key: os.environ/GOOGLE_API_KEY_5
   - model_name: emb-general
     litellm_params:
       model: thenlper/gte-large
-      api_base: http://tei-gte-large:80/embed
-      custom_llm_provider: huggingface
-      input_type: embed
-  - model_name: emb-code
-    litellm_params:
-      model: gemini/embedding-001
-      api_key: os.environ/GOOGLE_API_KEY_1
-  - model_name: emb-code
-    litellm_params:
-      model: gemini/embedding-001
-      api_key: os.environ/GOOGLE_API_KEY_2
-  - model_name: emb-code
-    litellm_params:
-      model: gemini/embedding-001
-      api_key: os.environ/GOOGLE_API_KEY_3
-  - model_name: emb-code
-    litellm_params:
-      model: gemini/embedding-001
-      api_key: os.environ/GOOGLE_API_KEY_4
-  - model_name: emb-code
-    litellm_params:
-      model: gemini/embedding-001
-      api_key: os.environ/GOOGLE_API_KEY_5
-  - model_name: emb-law
+      api_base: ${TEI_GTE_LARGE_URL}
+      provider: text-embeddings-inference
+  - model_name: emb-legal
     litellm_params:
       model: nlpaueb/legal-bert-base-uncased
-      api_base: http://tei-legal:80/embed
-      custom_llm_provider: huggingface
-      input_type: embed
+      api_base: ${TEI_LEGAL_BERT_URL}
+      provider: text-embeddings-inference
+  - model_name: emb-code
+    litellm_params:
+      model: thenlper/gte-large
+      api_base: ${TEI_GTE_LARGE_URL}
+      provider: text-embeddings-inference
   - model_name: voyage-law-2
     litellm_params:
       model: voyage-law-2
-      api_base: https://api.voyageai.com/v1
+      api_base: ${VOYAGE_API_BASE_URL}
       custom_llm_provider: voyage
   - model_name: voyage-2
     litellm_params:
       model: voyage-2
-      api_base: https://api.voyageai.com/v1
+      api_base: ${VOYAGE_API_BASE_URL}
       custom_llm_provider: voyage
   - model_name: smollm2-1.7b
     litellm_params:
       model: smollm2:1.7b
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: local-assistant
     litellm_params:
       model: smollm2:1.7b
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: emotion-english-distilroberta-base
     litellm_params:
       model: emotion-english-distilroberta-base
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: emo-english
     litellm_params:
       model: emotion-english-distilroberta-base
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: twitter-roberta-base-emotion
     litellm_params:
       model: twitter-roberta-base-emotion
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: emo-twitter
     litellm_params:
       model: twitter-roberta-base-emotion
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: twitter-roberta-base-sentiment-latest
     litellm_params:
       model: twitter-roberta-base-sentiment-latest
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: sent-twitter
     litellm_params:
       model: twitter-roberta-base-sentiment-latest
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0
   - model_name: qwen3-235b-int8
     litellm_params:
       model: qwen3-235b-int8
-      api_base: http://ollama:11434
+      api_base: ${OLLAMA_BASE_URL}
       custom_llm_provider: ollama
       temperature: 0.2
 
