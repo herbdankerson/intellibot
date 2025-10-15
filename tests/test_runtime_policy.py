@@ -112,7 +112,7 @@ def test_ingest_web_capture_uses_active_spaces(monkeypatch):
         lambda: _DummyEngine(),
     )
 
-    def fake_persist_results(item, document, chunks, embeddings, abstractions):
+    def fake_persist_results(item, document, chunks, embeddings, chunk_emotions, abstractions):
         spaces = sorted({embedding.space for embedding in embeddings})
         call_log.append(spaces)
         return FlowReport(

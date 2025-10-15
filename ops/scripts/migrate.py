@@ -8,7 +8,7 @@ import sys
 BASE_DIR = Path(__file__).resolve().parents[2]
 sys.path.append(str(BASE_DIR))
 
-from src.my_agentic_chatbot.storage.db import get_engine, run_sql_file
+from src.my_agentic_chatbot.storage.connection import get_engine, run_sql_file
 SCHEMA_PATH = BASE_DIR / "src" / "my_agentic_chatbot" / "storage" / "models.sql"
 
 

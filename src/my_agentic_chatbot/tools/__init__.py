@@ -1,4 +1,4 @@
-"""Tool adapters exposed to the workflow layer."""
+"""Stub tool exports for temporary end-to-end validation."""
 
 from .db_tools import DatabaseTool
 from .graph_tools import GraphTool

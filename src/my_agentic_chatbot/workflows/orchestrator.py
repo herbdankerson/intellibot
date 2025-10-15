@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from agent_framework import Executor, WorkflowBuilder, WorkflowContext, handler
 
-from ..agents import get_agent_config, iter_custom_agent_descriptors
+from ..agents import AgentConfig, get_agent_config, iter_custom_agent_descriptors
 from ..agents.runtime import CustomAgentRunner
 from ..config import get_settings
 from ..runtime_config import get_runtime_config
@@ -16,6 +16,8 @@ from ..constants import (
     ACCEPTANCE_BASE_MIN_SOURCES,
     ACCEPTANCE_CONFIDENCE_THRESHOLD,
     ACCEPTANCE_STRICT_MIN_SOURCES,
+    DEFAULT_DB_BUDGET_TOKENS,
+    DEFAULT_DB_TIMEOUT_SECONDS,
     MAX_WORKFLOW_ITERATIONS,
 )
 from ..llm_calls.llm_client import push_run_logger, reset_run_logger
@@ -54,6 +56,7 @@ from ..util.tracing import generate_run_id
 from .approver import ApprovalResult, Approver, AutoApprover
 from .audit import AuditAgent
 from . import policies
+from ..storage.config_repo import get_registry
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,6 +115,8 @@ class PlanLoopState:
     evidence_pack: EvidencePack | None = None
     response: AgentResponse | None = None
     audit_report: AuditReport | None = None
+    agent_config: AgentConfig | None = None
+    tool_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def unsatisfied_requirements(self) -> List[str]:
         return [
@@ -137,40 +142,31 @@ class ToolSuite:
         legal: MCPJsonTool | None = None,
         custom_agents: Dict[str, CustomAgentRunner] | None = None,
     ) -> None:
-        self.sequential = sequential or SequentialThinkingTool(
-            server_name="sequentialthinking",
-            default_tool="sequentialthinking",
-            id_prefix="seq",
-        )
+        self.sequential = sequential or SequentialThinkingTool()
         self.db = db or DatabaseTool()
         self.graph = graph or GraphTool()
-        self.web = web or WebTool(sequential_tool=self.sequential)
-        self.neo4j_cypher = neo4j_cypher or MCPJsonTool(
-            server_name="neo4j-cypher",
-            default_tool="read_neo4j_cypher",
-            id_prefix="neo4j",
-        )
-        self.neo4j_memory = neo4j_memory or MCPJsonTool(
-            server_name="neo4j-memory",
-            default_tool="search_memories",
-            id_prefix="memory",
-        )
-        self.neo4j_modeling = neo4j_modeling or MCPJsonTool(
-            server_name="neo4j-modeling",
-            default_tool="list_example_data_models",
-            id_prefix="model",
-        )
-        self.legal = legal or MCPJsonTool(
-            server_name="legal",
-            default_tool="search",
-            id_prefix="legal",
-        )
+        self.web = web or WebTool()
+        self.neo4j_cypher = neo4j_cypher or MCPJsonTool(server_name="neo4j-cypher")
+        self.neo4j_memory = neo4j_memory or MCPJsonTool(server_name="neo4j-memory")
+        self.neo4j_modeling = neo4j_modeling or MCPJsonTool(server_name="neo4j-modeling")
+        self.legal = legal or MCPJsonTool(server_name="legal")
         self.agents = custom_agents or {}
         self.registry = self._build_registry()
 
     def _wrap(self, callable_obj):
-        def _runner(task: PlanTask, requirement: Requirement) -> ToolOutcome:
-            result = callable_obj(task, requirement)
+        def _runner(
+            task: PlanTask,
+            requirement: Requirement,
+            *,
+            scope: Optional[Sequence[str]] = None,
+            overrides: Optional[Dict[str, Any]] = None,
+        ) -> ToolOutcome:
+            result = callable_obj(
+                task,
+                requirement,
+                scope=scope,
+                overrides=overrides,
+            )
             if isinstance(result, ToolOutcome):
                 return result
             if isinstance(result, list):
@@ -181,16 +177,31 @@ class ToolSuite:
 
     def _build_registry(self) -> Dict[str, Any]:
         registry = {
-            "db_search": lambda task, requirement: self.db.execute(
-                task,
-                requirement,
-                limit=policies.MAX_EVIDENCE_ITEMS,
+            "db_search": self._wrap(
+                lambda task, requirement, *, scope=None, overrides=None: self.db.execute(
+                    task,
+                    requirement,
+                    limit=policies.MAX_EVIDENCE_ITEMS,
+                    scope=scope,
+                    overrides=overrides,
+                )
             ),
-            "graph_search": lambda task, requirement: self.graph.execute(task, requirement),
-            "web_search": lambda task, requirement: self.web.execute(
-                task,
-                requirement,
-                limit=policies.MAX_WEB_RESULTS,
+            "graph_search": self._wrap(
+                lambda task, requirement, *, scope=None, overrides=None: self.graph.execute(
+                    task,
+                    requirement,
+                    scope=scope,
+                    overrides=overrides,
+                )
+            ),
+            "web_search": self._wrap(
+                lambda task, requirement, *, scope=None, overrides=None: self.web.execute(
+                    task,
+                    requirement,
+                    limit=policies.MAX_WEB_RESULTS,
+                    scope=scope,
+                    overrides=overrides,
+                )
             ),
             "agent-sequentialthinking": self._wrap(self.sequential.execute),
             "neo4j_cypher": self._wrap(self.neo4j_cypher.execute),
@@ -309,6 +320,14 @@ class InitializeRun(Executor):
                 ),
             )
         state.task_status = _prepare_task_status(plan)
+
+        try:
+            planner_config = get_agent_config("planner")
+        except Exception as exc:  # pragma: no cover - configuration issues surface early
+            LOGGER.error("Failed to load planner agent configuration", exc_info=exc)
+            raise
+        state.agent_config = planner_config
+        state.tool_overrides = dict(planner_config.tool_overrides)
 
         decision = self._approver.approve_plan(plan)
         if run_logger is not None:
@@ -506,6 +525,24 @@ class ExecuteTasks(Executor):
     def _run_task(
         self, state: PlanLoopState, task: PlanTask, requirement: Requirement
     ) -> ToolOutcome | None:
+        registry_snapshot = get_registry()
+        allowed_tools = state.tool_overrides or registry_snapshot.agent_tools("planner")
+        if allowed_tools and task.tool in registry_snapshot.tools:
+            if task.tool not in allowed_tools:
+                state.task_status[task.id] = TaskStatus.FAILED
+                message = f"Tool {task.tool} is not permitted for planner agent"
+                state.report.record(
+                    ExecutionEvent(task_id=task.id, status=TaskStatus.FAILED, message=message)
+                )
+                if state.run_logger is not None:
+                    state.run_logger.log_tool_result(
+                        task_id=task.id,
+                        tool=task.tool,
+                        status="failed",
+                        inputs=_safe_task_inputs(task.inputs),
+                        error=message,
+                    )
+                return None
         runner = self._tools.registry.get(task.tool)
         if runner is None:
             state.task_status[task.id] = TaskStatus.FAILED
@@ -528,8 +565,24 @@ class ExecuteTasks(Executor):
         enriched_inputs.setdefault("_task_id", task.id)
         enriched_inputs.setdefault("_iteration", state.iteration)
         task_for_tool = task.model_copy(update={"inputs": enriched_inputs})
+
+        scope: Optional[List[str]] = None
+        overrides: Optional[Dict[str, Any]] = None
+        agent_config = state.agent_config
+        if agent_config is not None:
+            if agent_config.db_scope:
+                scope = list(agent_config.db_scope)
+            tool_override = state.tool_overrides.get(task.tool)
+            if tool_override:
+                overrides = dict(tool_override)
+
         try:
-            return runner(task_for_tool, requirement)
+            outcome = runner(
+                task_for_tool,
+                requirement,
+                scope=scope,
+                overrides=overrides,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             state.task_status[task.id] = TaskStatus.FAILED
             message = f"Tool execution failed: {exc}"[:400]
@@ -546,6 +599,75 @@ class ExecuteTasks(Executor):
                     error=str(exc),
                 )
             return ToolOutcome(notes=[message])
+
+        if task.tool == "web_search":
+            refresh = self._refresh_kb_after_web(state, task, requirement, scope)
+            if refresh is not None:
+                outcome.evidence.extend(refresh.evidence)
+                outcome.findings.extend(refresh.findings)
+                if refresh.notes:
+                    outcome.notes.extend(refresh.notes)
+
+        return outcome
+
+    def _refresh_kb_after_web(
+        self,
+        state: PlanLoopState,
+        task: PlanTask,
+        requirement: Requirement,
+        scope: Optional[Iterable[str]],
+    ) -> ToolOutcome | None:
+        if not scope:
+            return None
+        db_runner = self._tools.registry.get("db_search")
+        if db_runner is None:
+            return None
+        db_overrides = state.tool_overrides.get("db_search") or {}
+        query_limit = None
+        if isinstance(task.inputs, dict):
+            value = task.inputs.get("limit")
+            if isinstance(value, int) and value > 0:
+                query_limit = value
+        refresh_inputs: Dict[str, Any] = {"query": requirement.question}
+        if query_limit is not None:
+            refresh_inputs["limit"] = query_limit
+        refresh_inputs.update(
+            {
+                "_run_id": state.run_id,
+                "_requirement_id": requirement.id,
+                "_task_id": f"{task.id}-kb-refresh",
+                "_iteration": state.iteration,
+            }
+        )
+        refresh_task = PlanTask(
+            id=f"{task.id}-kb-refresh",
+            requirement_id=task.requirement_id,
+            description="Re-run knowledge base search after web promotion",
+            tool="db_search",
+            priority=task.priority,
+            budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
+            timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
+            requires_approval=False,
+            inputs=refresh_inputs,
+            depends_on=[task.id],
+        )
+        try:
+            result = db_runner(
+                refresh_task,
+                requirement,
+                scope=list(scope),
+                overrides=dict(db_overrides) if db_overrides else None,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning(
+                "Post-web KB refresh failed",
+                extra={"task": task.id, "error": str(exc)},
+            )
+            return ToolOutcome(notes=[f"kb refresh failed: {exc}"])
+        if not isinstance(result, ToolOutcome):
+            return ToolOutcome()
+        result.notes.append("kb refresh executed after web search")
+        return result
 
 
 class CurateEvidence(Executor):

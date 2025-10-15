@@ -1,4 +1,4 @@
-"""Shared tool adapter types."""
+"""Simplified tool outcome types for the stubbed tool suite."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from ..schemas import EvidenceItem, Finding
 
 @dataclass
 class ToolOutcome:
-    """Normalized output from tool adapters for orchestrator consumption."""
+    """Container returned by stub tools to mimic real adapters."""
 
     evidence: List[EvidenceItem] = field(default_factory=list)
     findings: List[Finding] = field(default_factory=list)

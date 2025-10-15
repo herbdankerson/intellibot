@@ -7,21 +7,39 @@ router_settings:
 model_list:
   - model_name: planner
     litellm_params:
-      model: smollm2:1.7b
-      api_base: ${OLLAMA_BASE_URL}
-      custom_llm_provider: ollama
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0
+  - model_name: planner-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
       temperature: 0
   - model_name: responder
     litellm_params:
-      model: smollm2:1.7b
-      api_base: ${OLLAMA_BASE_URL}
-      custom_llm_provider: ollama
-      temperature: 0
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: responder-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
   - model_name: cheap-worker
     litellm_params:
-      model: smollm2:1.7b
-      api_base: ${OLLAMA_BASE_URL}
-      custom_llm_provider: ollama
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: worker-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
       temperature: 0.2
   - model_name: emb-general
     litellm_params:

@@ -13,22 +13,10 @@ import sys
 sys.path.append(str(BASE_DIR))
 
 from src.my_agentic_chatbot.config import get_settings
-from src.my_agentic_chatbot.storage.db import get_engine
+from src.my_agentic_chatbot.storage.connection import get_engine, run_sql_file
 
 MODELS_SQL = Path("src/my_agentic_chatbot/storage/models.sql")
 INDEX_SQL = Path("ops/scripts/sql/create_embedding_indexes.sql")
-
-
-def _iter_schema_statements() -> list[str]:
-    sql_text = MODELS_SQL.read_text()
-    statements = [segment.strip() for segment in sql_text.split(";") if segment.strip()]
-    filtered: list[str] = []
-    for statement in statements:
-        # Skip cfg.* DDL and seed statements to preserve runtime configuration.
-        if "cfg." in statement.lower():
-            continue
-        filtered.append(statement)
-    return filtered
 
 
 def reset_schemas(*, drop_only: bool = False) -> None:
@@ -36,12 +24,10 @@ def reset_schemas(*, drop_only: bool = False) -> None:
     with engine.begin() as connection:
         connection.execute(text("DROP SCHEMA IF EXISTS kb CASCADE"))
         connection.execute(text("DROP SCHEMA IF EXISTS agent CASCADE"))
-        if drop_only:
-            return
-        statements = _iter_schema_statements()
-        for statement in statements:
-            connection.execute(text(statement))
-        _run_index_sql(connection)
+    if drop_only:
+        return
+    run_sql_file(str(MODELS_SQL), engine=engine)
+    create_indexes(engine)
 
 
 def _run_index_sql(connection) -> None:
@@ -50,9 +36,9 @@ def _run_index_sql(connection) -> None:
     connection.execute(text(INDEX_SQL.read_text()))
 
 
-def create_indexes() -> None:
-    engine = get_engine()
-    with engine.begin() as connection:
+def create_indexes(engine=None) -> None:
+    target_engine = engine or get_engine()
+    with target_engine.begin() as connection:
         _run_index_sql(connection)
 
 

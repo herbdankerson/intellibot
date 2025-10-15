@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -28,6 +28,7 @@ from ..constants import (
     DEFAULT_WEB_BUDGET_TOKENS,
     DEFAULT_WEB_TIMEOUT_SECONDS,
 )
+from ..storage.config_repo import get_registry
 
 THINKING_BUDGET_MIN = 128
 THINKING_BUDGET_MAX = 32768
@@ -35,10 +36,76 @@ MAX_OUTPUT_TOKENS = 65536
 RESERVED_AGENT_NAMES = {"planner", "responder", "audit"}
 
 
+_TOOL_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "db_search": {
+        "description": "Hybrid ParadeDB search (BM25 + pgvector snippets)",
+        "runtime": "mcp",
+        "budget": DEFAULT_DB_BUDGET_TOKENS,
+        "timeout": DEFAULT_DB_TIMEOUT_SECONDS,
+        "planner_visible": True,
+    },
+    "web_search": {
+        "description": "SearxNG toolbox search with fetch + summarize",
+        "runtime": "native",
+        "budget": DEFAULT_WEB_BUDGET_TOKENS,
+        "timeout": DEFAULT_WEB_TIMEOUT_SECONDS,
+        "planner_visible": False,
+    },
+    "graph_search": {
+        "description": "Graph reasoning over Neo4j knowledge graph",
+        "runtime": "mcp",
+        "budget": DEFAULT_GRAPH_BUDGET_TOKENS,
+        "timeout": DEFAULT_GRAPH_TIMEOUT_SECONDS,
+        "requires_approval": True,
+        "planner_visible": False,
+    },
+    "neo4j_cypher": {
+        "description": "Neo4j Cypher query agent for graph exploration",
+        "runtime": "mcp",
+        "budget": DEFAULT_GRAPH_BUDGET_TOKENS,
+        "timeout": DEFAULT_GRAPH_TIMEOUT_SECONDS,
+        "requires_approval": True,
+        "planner_visible": False,
+    },
+    "neo4j_memory": {
+        "description": "Neo4j memory agent for entity & observation store",
+        "runtime": "mcp",
+        "budget": DEFAULT_GRAPH_MEMORY_BUDGET_TOKENS,
+        "timeout": DEFAULT_GRAPH_MEMORY_TIMEOUT_SECONDS,
+        "requires_approval": True,
+        "planner_visible": False,
+    },
+    "neo4j_modeling": {
+        "description": "Neo4j data-modeling agent (schema + validation)",
+        "runtime": "mcp",
+        "budget": DEFAULT_GRAPH_MODELING_BUDGET_TOKENS,
+        "timeout": DEFAULT_GRAPH_MODELING_TIMEOUT_SECONDS,
+        "requires_approval": True,
+        "planner_visible": False,
+    },
+    "legal_search": {
+        "description": "Legal knowledge MCP search (ParadeDB legal corpus)",
+        "runtime": "mcp",
+        "budget": DEFAULT_DB_BUDGET_TOKENS,
+        "timeout": DEFAULT_DB_TIMEOUT_SECONDS,
+        "planner_visible": False,
+    },
+    "agent-sequentialthinking": {
+        "description": "Sequential Thinking MCP agent for reflective planning",
+        "runtime": "mcp",
+        "budget": DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
+        "timeout": DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
+        "planner_visible": True,
+    },
+}
+
+
 class AgentGenerationConfig(BaseModel):
     """Gemini generation configuration for an agent."""
 
-    response_mime_type: Literal["text/plain"] = Field(alias="response_mime_type")
+    response_mime_type: Literal["text/plain", "application/json"] = Field(
+        alias="response_mime_type"
+    )
     max_output_tokens: int = Field(alias="max_output_tokens", ge=1, le=MAX_OUTPUT_TOKENS)
     thinking_mode: Literal["dynamic", "disabled", "fixed"] = Field(alias="thinking_mode")
     thinking_budget_tokens: int = Field(
@@ -88,6 +155,13 @@ class AgentConfig(BaseModel):
     model: str
     include_thoughts: bool = False
     generation: AgentGenerationConfig
+    system_prompt: Optional[str] = None
+    type: Literal["base", "planner", "custom"] = "base"
+    params: Dict[str, Any] = Field(default_factory=dict)
+    tool_overrides: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    db_scope: List[str] = Field(default_factory=list)
+    enabled: bool = True
+    notes: Optional[str] = None
 
     def build_generation_payload(
         self,
@@ -112,7 +186,7 @@ class AgentDescriptor:
 
     tool: str
     description: str
-    runtime: Literal["mcp", "llm"]
+    runtime: Literal["mcp", "llm", "native"]
     default_budget_tokens: int
     default_timeout_seconds: int
     requires_approval: bool = False
@@ -129,42 +203,114 @@ class AgentDescriptor:
         )
 
 
+def _merge_dicts(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(base)
+    for key, value in overlay.items():
+        if (
+            isinstance(value, dict)
+            and isinstance(result.get(key), dict)
+        ):
+            result[key] = _merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 @lru_cache(maxsize=32)
-def _load_agent_config(path: Path) -> AgentConfig:
+def _load_agent_overlay(path: Path) -> Dict[str, Any]:
     raw = yaml.safe_load(path.read_text()) or {}
-    try:
-        return AgentConfig.model_validate(raw)
-    except ValidationError as exc:  # pragma: no cover - configuration issue
-        raise ValueError(f"Invalid agent configuration at {path}: {exc}") from exc
+    if not isinstance(raw, dict):  # pragma: no cover - configuration issue
+        raise ValueError(f"Agent overlay at {path} must be a mapping")
+    return raw
+
+
+def _overlay_directory() -> Path:
+    settings = get_settings()
+    return settings.resolve_path(settings.agents_config_dir)
+
+
+def _load_overlay_for(agent_name: str) -> Dict[str, Any]:
+    directory = _overlay_directory()
+    path = directory / f"{agent_name}.yaml"
+    if not path.exists():
+        return {}
+    return _load_agent_overlay(path)
+
+
+def _overlay_agent_names() -> Iterable[str]:
+    directory = _overlay_directory()
+    if not directory.exists():
+        return []
+    names: List[str] = []
+    for path in directory.glob("*.yaml"):
+        if path.name == "schema.yaml":
+            continue
+        data = _load_agent_overlay(path)
+        name = data.get("name") or path.stem
+        names.append(str(name))
+    return names
+
+
+def _payload_from_record(record) -> Dict[str, Any]:
+    params = dict(record.params)
+    model_alias = params.get("model") or record.model_alias or record.name
+    generation = params.get("generation") or {}
+    include_thoughts = params.get("include_thoughts")
+    payload: Dict[str, Any] = {
+        "name": record.name,
+        "model": model_alias,
+        "include_thoughts": bool(include_thoughts) if include_thoughts is not None else False,
+        "generation": generation,
+        "system_prompt": record.system_prompt,
+        "type": record.type,
+        "params": params,
+        "tool_overrides": record.tool_bindings,
+        "db_scope": record.db_scope,
+        "enabled": record.enabled,
+        "notes": record.notes,
+    }
+    if not payload["generation"]:
+        raise ValueError(
+            f"Agent '{record.name}' missing generation configuration in cfg.agents.params"
+        )
+    return payload
 
 
 @lru_cache(maxsize=8)
 def get_agent_config(agent_name: str) -> AgentConfig:
-    """Load agent configuration from disk."""
+    """Load agent configuration from the database with optional YAML overlay."""
 
-    settings = get_settings()
-    agent_dir = settings.resolve_path(settings.agents_config_dir)
-    path = agent_dir / f"{agent_name}.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Agent configuration not found for '{agent_name}' at {path}")
-    return _load_agent_config(path)
+    registry = get_registry()
+    base_payload: Dict[str, Any]
+    try:
+        record = registry.require_agent(agent_name)
+    except RuntimeError:
+        overlay = _load_overlay_for(agent_name)
+        if not overlay:
+            raise
+        base_payload = overlay
+    else:
+        base_payload = _payload_from_record(record)
+        overlay = _load_overlay_for(agent_name)
+        if overlay:
+            base_payload = _merge_dicts(base_payload, overlay)
+
+    try:
+        return AgentConfig.model_validate(base_payload)
+    except ValidationError as exc:  # pragma: no cover - configuration issue
+        raise ValueError(f"Invalid agent configuration for '{agent_name}': {exc}") from exc
 
 
 @lru_cache(maxsize=4)
 def list_agent_configs() -> Dict[str, AgentConfig]:
-    """Return all agent configurations keyed by their logical name."""
+    """Return all known agent configurations keyed by logical name."""
 
-    settings = get_settings()
-    agent_dir = settings.resolve_path(settings.agents_config_dir)
-    if not agent_dir.exists():
-        return {}
-
+    registry = get_registry()
     configs: Dict[str, AgentConfig] = {}
-    for path in agent_dir.glob("*.yaml"):
-        if path.name == "schema.yaml":
-            continue
-        config = _load_agent_config(path)
-        configs[config.name] = config
+    for name in registry.agents.keys():
+        configs[name] = get_agent_config(name)
+    for name in _overlay_agent_names():
+        configs.setdefault(name, get_agent_config(name))
     return configs
 
 
@@ -172,69 +318,26 @@ def list_agent_configs() -> Dict[str, AgentConfig]:
 def get_agent_catalog() -> Dict[str, AgentDescriptor]:
     """Build a map of tool identifiers to planner-visible agent descriptors."""
 
-    catalog: Dict[str, AgentDescriptor] = {
-        "db_search": AgentDescriptor(
-            tool="db_search",
-            description="Hybrid ParadeDB search (BM25 + pgvector snippets)",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
-        ),
-        "web_search": AgentDescriptor(
-            tool="web_search",
-            description="SearxNG toolbox search with fetch + summarize",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_WEB_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_WEB_TIMEOUT_SECONDS,
-            planner_visible=False,
-        ),
-        "neo4j_cypher": AgentDescriptor(
-            tool="neo4j_cypher",
-            description="Neo4j Cypher query agent for graph exploration",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_GRAPH_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_GRAPH_TIMEOUT_SECONDS,
-            requires_approval=True,
-            planner_visible=False,
-        ),
-        "neo4j_memory": AgentDescriptor(
-            tool="neo4j_memory",
-            description="Neo4j memory agent for entity & observation store",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_GRAPH_MEMORY_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_GRAPH_MEMORY_TIMEOUT_SECONDS,
-            requires_approval=True,
-            planner_visible=False,
-        ),
-        "neo4j_modeling": AgentDescriptor(
-            tool="neo4j_modeling",
-            description="Neo4j data-modeling agent (schema + validation)",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_GRAPH_MODELING_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_GRAPH_MODELING_TIMEOUT_SECONDS,
-            requires_approval=True,
-            planner_visible=False,
-        ),
-        "legal_search": AgentDescriptor(
-            tool="legal_search",
-            description="Legal knowledge MCP search (ParadeDB legal corpus)",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_DB_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_DB_TIMEOUT_SECONDS,
-            planner_visible=False,
-        ),
-        "agent-sequentialthinking": AgentDescriptor(
-            tool="agent-sequentialthinking",
-            description="Sequential Thinking MCP agent for reflective planning",
-            runtime="mcp",
-            default_budget_tokens=DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
-            default_timeout_seconds=DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
-            planner_visible=True,
-        ),
-    }
+    registry = get_registry()
+    catalog: Dict[str, AgentDescriptor] = {}
+    for slug, template in _TOOL_TEMPLATES.items():
+        tool_record = registry.tools.get(slug)
+        if tool_record is None or not tool_record.enabled:
+            continue
+        catalog[slug] = AgentDescriptor(
+            tool=slug,
+            description=template["description"],
+            runtime=template["runtime"],
+            default_budget_tokens=template["budget"],
+            default_timeout_seconds=template["timeout"],
+            requires_approval=template.get("requires_approval", False),
+            planner_visible=template.get("planner_visible", True),
+        )
 
     for name, config in list_agent_configs().items():
-        if name in RESERVED_AGENT_NAMES:
+        if name in RESERVED_AGENT_NAMES or not config.enabled:
+            continue
+        if config.type != "custom":
             continue
         tool_name = f"{CUSTOM_TASK_PREFIX}-{config.name}" if CUSTOM_TASK_PREFIX else config.name
         catalog[tool_name] = AgentDescriptor(

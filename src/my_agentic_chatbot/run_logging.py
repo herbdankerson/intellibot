@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .schemas import AgentResponse, AuditReport, EvidenceItem, EvidencePack, Finding, Plan
-from .storage.db import get_engine
+from .storage.connection import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -133,28 +133,24 @@ class AgentRunLogger:
                 """
                 INSERT INTO agent.events (
                     run_id,
-                    event_type,
-                    task_id,
-                    tool,
-                    status,
-                    payload
+                    raw
                 ) VALUES (
                     :run_id,
-                    :event_type,
-                    :task_id,
-                    :tool,
-                    :status,
-                    CAST(:payload AS JSONB)
+                    CAST(:raw AS JSONB)
                 )
                 """
             ),
             {
                 "run_id": str(self.run_id),
-                "event_type": event_type,
-                "task_id": task_id,
-                "tool": tool,
-                "status": status,
-                "payload": json.dumps(payload),
+                "raw": json.dumps(
+                    {
+                        "event_type": event_type,
+                        "payload": payload,
+                        "task_id": task_id,
+                        "tool": tool,
+                        "status": status,
+                    }
+                ),
             },
         )
 

@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-from prefect import flow
+try:
+    from prefect import flow
+except ModuleNotFoundError:  # pragma: no cover - prefect optional for CLI usage
+    def flow(function=None, *args, **kwargs):  # type: ignore
+        if function is None:
+            def decorator(fn):
+                return fn
+
+            return decorator
+        return function
 
 from etl.tasks.intake_models import FlowReport, IngestItem
 from etl.tasks import intake_tasks
@@ -18,6 +27,8 @@ def document_intake_flow(
     display_name: str,
     content: Optional[bytes] = None,
     extra_metadata: Optional[Dict[str, object]] = None,
+    target_namespace: str = "kb",
+    target_entries: Optional[str] = None,
 ) -> FlowReport:
     """Run the ingestion pipeline for the provided artefact."""
 
@@ -35,10 +46,24 @@ def document_intake_flow(
 
     chunks = intake_tasks.chunk_and_ner(item, normalized)
     item = intake_tasks.summarize_chunks(item, chunks)
+    chunk_emotions = intake_tasks.detect_emotions(item, chunks)
     abstractions = intake_tasks.build_budgeted_abstractions(chunks)
     embeddings = intake_tasks.embed_chunks(item, chunks)
 
-    report = intake_tasks.persist_results(item, normalized, chunks, embeddings, abstractions)
+    table_config = intake_tasks.table_config_from_namespace(
+        target_namespace,
+        entries=target_entries,
+    )
+
+    report = intake_tasks.persist_results(
+        item,
+        normalized,
+        chunks,
+        embeddings,
+        chunk_emotions,
+        abstractions,
+        table_config=table_config,
+    )
 
     if item.source_type == "document":
         intake_tasks.mirror_openwebui(item)

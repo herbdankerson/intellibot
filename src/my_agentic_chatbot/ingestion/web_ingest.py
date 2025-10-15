@@ -14,6 +14,7 @@ from etl.tasks.intake_models import Chunk, ChunkEmbedding, IngestItem, Normalize
 from etl.tasks.intake_tasks import (
     CHUNK_TOKENS_DEFAULT,
     OVERLAP_MAX_PCT_DEFAULT,
+    build_chunk_emotions,
     persist_results,
 )
 from etl.tasks.model_clients import (
@@ -24,7 +25,7 @@ from etl.tasks.model_clients import (
     summarize_with_gemini,
 )
 
-from ..storage.db import get_engine
+from ..storage.connection import get_engine
 from ..runtime_config import get_runtime_config
 
 LOGGER = logging.getLogger(__name__)
@@ -247,7 +248,15 @@ def ingest_web_capture(
         )
 
     abstractions = _build_abstractions(chunks)
-    report = persist_results.fn(item, document, chunks, embeddings, abstractions)
+    chunk_emotions = build_chunk_emotions(chunks)
+    report = persist_results.fn(
+        item,
+        document,
+        chunks,
+        embeddings,
+        chunk_emotions,
+        abstractions,
+    )
     kb_document_id = report.metadata.get("document_id")
 
     return UUID(kb_document_id) if kb_document_id else item.id, [chunk.id for chunk in chunks]

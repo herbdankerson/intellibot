@@ -101,6 +101,7 @@ def build_chunks(markdown: str, max_tokens: int, overlap_max_pct: float) -> List
     """Generate chunk dictionaries mirroring the MCP server implementation."""
 
     output: List[Dict[str, object]] = []
+    next_idx = 0
     for section in split_by_md_headings(markdown):
         token_len = rough_tokens(section["text"])
         overlap = decide_overlap(token_len, max_tokens, overlap_max_pct)
@@ -109,21 +110,23 @@ def build_chunks(markdown: str, max_tokens: int, overlap_max_pct: float) -> List
                 {
                     "title": section["title"],
                     "text": section["text"],
-                    "idx": 0,
+                    "idx": next_idx,
                     "token_count": token_len,
                     "overlap": 0,
                 }
             )
+            next_idx += 1
             continue
         pieces = sentence_chunk(section["text"], max_tokens, overlap)
-        for idx, chunk_text in enumerate(pieces):
+        for chunk_text in pieces:
             output.append(
                 {
                     "title": section["title"],
                     "text": chunk_text,
-                    "idx": idx,
+                    "idx": next_idx,
                     "token_count": rough_tokens(chunk_text),
                     "overlap": overlap,
                 }
             )
+            next_idx += 1
     return output

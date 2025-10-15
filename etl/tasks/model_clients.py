@@ -1,30 +1,30 @@
-"""LiteLLM-backed client helpers for Gemini and Voyage models."""
+"""Gateway-backed client helpers for ingestion-time LLM operations."""
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import httpx
+from functools import lru_cache
 
 from src.my_agentic_chatbot.config import get_settings
-from src.my_agentic_chatbot.llm_calls.llm_client import (
-    LLMClient,
-    LLMMessage,
-    get_current_run_logger,
-)
+from src.my_agentic_chatbot.llm_calls.llm_client import get_current_run_logger
 from src.my_agentic_chatbot.runtime_config import ModelConfig, get_runtime_config
+from src.freshbot.gateways import embed_code_texts
 
 LOGGER = logging.getLogger(__name__)
 
-GEMINI_SUMMARY_BATCH = 8
 GENERAL_EMBED_BATCH = 32
 LEGAL_EMBED_BATCH = 32
 CODE_EMBED_BATCH = 16
 DEFAULT_RETRIES = 3
+EMBED_TOKEN_LIMIT = 450  # keep ~12% under the TEI gte-large 512-token ceiling
+EMBED_APPROX_CHARS_PER_TOKEN = 1  # enforce a strict char clamp so actual token counts stay < limit
+DEFAULT_EMBED_DIMS = 1536
+
 
 
 def _active_model(key: str):
@@ -33,115 +33,141 @@ def _active_model(key: str):
     return get_runtime_config().active(key)
 
 
-def _worker_identifier() -> str:
-    return _active_model("active_worker_model").identifier
-
-
 def _truncate_snippet(text: str, limit: int = 320) -> Tuple[str, bool]:
     if len(text) <= limit:
         return text, False
     return text[: limit - 1] + "…", True
 
 
-def completion(
+def _estimate_token_count(
+    text: str,
     *,
-    model: str,
-    messages: List[Dict[str, str]],
-    temperature: float = 0.0,
-    max_output_tokens: Optional[int] = None,
-) -> Dict[str, object]:
-    """LiteLLM-compatible chat completion helper."""
-
-    llm_messages = [
-        LLMMessage(role=entry["role"], content=entry["content"])
-        for entry in messages
-    ]
-    client = LLMClient(model_name=model, temperature=temperature)
-    kwargs: Dict[str, object] = {}
-    if max_output_tokens is not None:
-        kwargs["max_tokens"] = max_output_tokens
-    try:
-        content = client.chat(llm_messages, **kwargs)
-    finally:
-        client.close()
-    payload_content = "" if content is None else str(content)
-    return {"choices": [{"message": {"content": payload_content}}]}
+    approx_chars_per_token: int = EMBED_APPROX_CHARS_PER_TOKEN,
+) -> int:
+    if not text:
+        return 0
+    # Whitespace tokenisation gives a lower bound; char-based estimate keeps us conservative.
+    whitespace_tokens = len(text.split())
+    char_tokens = len(text) // max(1, approx_chars_per_token)
+    return max(whitespace_tokens, char_tokens)
 
 
-def embedding(*, model: str, input: Sequence[str]) -> Dict[str, object]:
-    """LiteLLM embedding helper that proxies to the configured router."""
+def _truncate_for_embedding(
+    text: str,
+    *,
+    max_tokens: int = EMBED_TOKEN_LIMIT,
+    approx_chars_per_token: int = EMBED_APPROX_CHARS_PER_TOKEN,
+) -> Tuple[str, bool]:
+    """Clamp text to the provider's maximum token allowance."""
 
-    settings = get_settings()
-    base_url = settings.litellm_base_url
-    timeout = settings.litellm_timeout_seconds
-    headers = dict(settings.lite_llm_headers())
-    if settings.litellm_master_key and "Authorization" not in headers:
-        headers["Authorization"] = f"Bearer {settings.litellm_master_key}"
-    inputs = [str(text) for text in input]
-    preview = []
-    for idx, text in enumerate(inputs[:3]):
-        snippet, truncated = _truncate_snippet(text)
-        preview.append(
-            {
-                "index": idx,
-                "length": len(text),
-                "snippet": snippet,
-                "truncated": truncated,
-            }
-        )
-    logger = get_current_run_logger()
-    log_payload = {
-        "endpoint": "embeddings",
-        "model": model,
-        "input_count": len(inputs),
-        "input_preview": preview,
-    }
-    start = perf_counter()
-    with httpx.Client(base_url=base_url, timeout=timeout) as client:
-        try:
-            response = client.post(
-                "/v1/embeddings",
-                json={"model": model, "input": inputs},
-                headers=headers or None,
+    if not text:
+        return "", False
+
+    char_limit = max_tokens * approx_chars_per_token
+    truncated = text
+    truncated_flag = False
+    if len(truncated) > char_limit:
+        truncated = truncated[:char_limit]
+        truncated_flag = True
+        last_whitespace = truncated.rfind(" ")
+        if last_whitespace >= int(char_limit * 0.6):
+            truncated = truncated[:last_whitespace]
+
+    # Iteratively tighten until the conservative token estimate sits below the cap.
+    while _estimate_token_count(truncated, approx_chars_per_token=approx_chars_per_token) >= max_tokens and truncated:
+        truncated_flag = True
+        new_length = max(1, int(len(truncated) * 0.9))
+        truncated = truncated[:new_length]
+        last_whitespace = truncated.rfind(" ")
+        if last_whitespace >= max(1, int(new_length * 0.6)):
+            truncated = truncated[:last_whitespace]
+
+    return truncated.rstrip(), truncated_flag
+
+
+def _sanitize_embedding_inputs(
+    inputs: Sequence[str],
+    *,
+    max_tokens: int = EMBED_TOKEN_LIMIT,
+) -> Tuple[List[str], List[Dict[str, object]]]:
+    sanitized: List[str] = []
+    truncation_meta: List[Dict[str, object]] = []
+    for idx, raw in enumerate(inputs):
+        value = "" if raw is None else str(raw)
+        trimmed, truncated = _truncate_for_embedding(value, max_tokens=max_tokens)
+        sanitized.append(trimmed)
+        if truncated:
+            truncation_meta.append(
+                {
+                    "index": idx,
+                    "original_chars": len(value),
+                    "truncated_chars": len(trimmed),
+                }
             )
-            response.raise_for_status()
-            data = response.json()
-            if logger is not None:
-                vectors = data.get("data") if isinstance(data, dict) else None
-                dims = 0
-                if vectors and isinstance(vectors, list) and vectors and isinstance(vectors[0], dict):
-                    embedding = vectors[0].get("embedding")
-                    if isinstance(embedding, list):
-                        dims = len(embedding)
-                log_payload.update(
+    return sanitized, truncation_meta
+
+
+def _normalise_vector_dimensions(
+    *,
+    vectors: Sequence[Sequence[float]],
+    target_dims: Optional[int],
+    model_name: str,
+) -> List[List[float]]:
+    if target_dims is None or target_dims <= 0:
+        return [list(vector) for vector in vectors]
+
+    normalised: List[List[float]] = []
+    truncated_count = 0
+    padded_count = 0
+    samples: List[Dict[str, object]] = []
+    for index, vector in enumerate(vectors):
+        as_list = list(vector)
+        current = len(as_list)
+        if current == target_dims:
+            normalised.append(as_list)
+            continue
+        if current > target_dims:
+            truncated_count += 1
+            if len(samples) < 3:
+                samples.append(
                     {
-                        "status_code": response.status_code,
-                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
-                        "vector_dims": dims,
+                        "index": index,
+                        "original_dims": current,
+                        "target_dims": target_dims,
+                        "action": "truncated",
                     }
                 )
-                logger.log_event(
-                    "llm_call",
-                    log_payload,
-                    tool="liteLLM",
-                    status="success",
-                )
-            return data
-        except Exception as exc:
-            if logger is not None:
-                log_payload.update(
-                    {
-                        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
-                        "error": str(exc),
-                    }
-                )
-                logger.log_event(
-                    "llm_call",
-                    log_payload,
-                    tool="liteLLM",
-                    status="error",
-                )
-            raise
+            normalised.append(as_list[:target_dims])
+            continue
+        padding = target_dims - current
+        padded_count += 1
+        if len(samples) < 3:
+            samples.append(
+                {
+                    "index": index,
+                    "original_dims": current,
+                    "target_dims": target_dims,
+                    "padding": padding,
+                    "action": "padded",
+                }
+            )
+        normalised.append(as_list + [0.0] * padding)
+    if truncated_count or padded_count:
+        LOGGER.warning(
+            "embedding vectors adjusted",
+            extra={
+                "model": model_name,
+                "target_dims": target_dims,
+                "truncated": truncated_count,
+                "padded": padded_count,
+                "samples": samples,
+            },
+        )
+    return normalised
+def embedding(*, model: ModelConfig, input: Sequence[str]) -> List[List[float]]:
+    """Dispatch embedding requests directly to the configured provider."""
+
+    return _call_embedding_provider(model=model, inputs=[str(text) for text in input])
 
 
 @dataclass(frozen=True)
@@ -154,121 +180,25 @@ class ClassificationResult:
 
 
 def summarize_with_gemini(text: str, *, max_length: int = 600) -> str:
-    """Summarize the supplied text using Gemini 2.5 Flash via LiteLLM."""
+    """Summarize the supplied text using the Freshbot Gemini tool."""
 
-    payload = {
-        "role": "user",
-        "max_length": max_length,
-        "content": text,
-    }
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a senior analyst producing factual document summaries. "
-                "Write in complete sentences, stay under the requested character cap, "
-                "and avoid prefacing the summary."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(payload),
-        },
-    ]
-    response_text = _invoke_chat(
-        messages,
-        model=_worker_identifier(),
-        temperature=0.1,
-        max_output_tokens=max_length,
-    )
-    summary = response_text.strip()
-    if len(summary) > max_length:
-        summary = summary[: max_length - 3].rstrip() + "..."
-    return summary
+    return _fresh_ingestion().summarize_document(text, max_length=max_length)
 
 
 def summarize_chunks_with_gemini(texts: Sequence[str], *, max_length: int = 256) -> List[str]:
-    """Summarize a sequence of chunks using batched Gemini calls."""
+    """Summarize a sequence of chunks using the Freshbot Gemini tool."""
 
-    if not texts:
-        return []
-
-    summaries: List[str] = []
-    for batch in _batched(list(texts), GEMINI_SUMMARY_BATCH):
-        payload = {
-            "max_length": max_length,
-            "items": [
-                {
-                    "index": index,
-                    "text": text,
-                }
-                for index, text in enumerate(batch)
-            ],
-        }
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You summarise passages for retrieval. For each input item respond with a "
-                    "concise summary under the specified character limit. Return a JSON array "
-                    "of strings ordered to match the provided indexes."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(payload),
-            },
-        ]
-        response_text = _invoke_chat(
-            messages,
-            model=_worker_identifier(),
-            temperature=0.1,
-            max_output_tokens=max_length,
-        )
-        summaries.extend(_parse_summary_array(response_text, batch, max_length))
-    return summaries
+    return _fresh_ingestion().summarize_chunks(texts, max_length=max_length)
 
 
 def classify_domain(text: str) -> ClassificationResult:
     """Classify the document domain (`legal`, `code`, `general`)."""
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a classifier labelling content for a retrieval pipeline. "
-                "Choose the primary domain from ['legal', 'code', 'general']. "
-                "Respond with compact JSON containing domain, confidence (0-1), "
-                "and any applicable source_labels (e.g. ['document'], ['website'])."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps({"content": text[:6000]}),
-        },
-    ]
-    response_text = _invoke_chat(
-        messages,
-        model=_worker_identifier(),
-        temperature=0.0,
-        max_output_tokens=256,
-    )
-    try:
-        payload = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        LOGGER.warning("Classifier returned non-JSON payload: %s", response_text)
-        raise RuntimeError("Gemini classifier returned invalid JSON") from exc
-
-    domain = str(payload.get("domain", "general")).lower()
-    if domain not in {"legal", "code", "general"}:
-        LOGGER.warning("Classifier returned unexpected domain '%s'", domain)
-        domain = "general"
-    confidence = float(payload.get("confidence", 0.5))
-    source_labels_raw = payload.get("source_labels")
-    if isinstance(source_labels_raw, list):
-        source_labels = [str(label) for label in source_labels_raw]
-    else:
-        source_labels = []
+    payload = _fresh_ingestion().classify_document(text)
+    domain = str(payload.get("domain", "general"))
+    confidence = float(payload.get("confidence", 0.5) or 0.5)
+    labels = payload.get("source_labels")
+    source_labels = [str(label) for label in labels] if isinstance(labels, list) else []
     return ClassificationResult(domain=domain, confidence=confidence, source_labels=source_labels)
 
 
@@ -323,47 +253,13 @@ def embed_with_voyage(texts: Sequence[str], *, model: str) -> List[List[float]]:
     return _batched_embedding_request(texts, model=fallback, batch_size=CODE_EMBED_BATCH)
 
 
+def analyze_emotions(text: str) -> List[Dict[str, Any]]:
+    """Run emotion and sentiment classifiers against the supplied text."""
+    return _fresh_ingestion().detect_emotions(text)
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
-
-
-def _invoke_chat(
-    messages: List[Dict[str, str]],
-    *,
-    model: str,
-    temperature: float,
-    max_output_tokens: Optional[int] = None,
-) -> str:
-    last_error: Optional[Exception] = None
-    for attempt in range(1, DEFAULT_RETRIES + 1):
-        try:
-            response = completion(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-            )
-            choices = response.get("choices") if isinstance(response, dict) else None
-            if not choices:
-                return ""
-            message = choices[0].get("message") if isinstance(choices[0], dict) else {}
-            content = "" if message is None else message.get("content", "")
-            return "" if content is None else str(content)
-        except Exception as exc:  # pragma: no cover - exercised via mocks
-            last_error = exc
-            LOGGER.warning(
-                "LiteLLM chat attempt %s failed for model %s: %s",
-                attempt,
-                model,
-                exc,
-            )
-        finally:
-            try:
-                client.close()
-            except Exception:  # pragma: no cover - defensive
-                pass
-    raise RuntimeError("Gemini completion failed") from last_error
-
 
 def _batched_embedding_request(
     texts: Sequence[str],
@@ -378,11 +274,7 @@ def _batched_embedding_request(
         last_error: Optional[Exception] = None
         for attempt in range(1, DEFAULT_RETRIES + 1):
             try:
-                response = embedding(model=model_identifier, input=batch)
-                data = response.get("data") if isinstance(response, dict) else []
-                if len(data) != len(batch):
-                    raise RuntimeError("Embedding count mismatch")
-                vectors.extend([list(item.get("embedding", [])) for item in data])
+                vectors.extend(embedding(model=model, input=batch))
                 break
             except Exception as exc:  # pragma: no cover - exercised via mocks
                 last_error = exc
@@ -394,49 +286,223 @@ def _batched_embedding_request(
                     exc,
                 )
         else:
-            raise RuntimeError("Embedding request failed") from last_error
+            LOGGER.error(
+                "Embedding request failed after %s attempts; returning zero vectors",
+                DEFAULT_RETRIES,
+                extra={"model": model_name, "identifier": model_identifier},
+            )
+            dims = model.dims or DEFAULT_EMBED_DIMS
+            zero_vector = [0.0] * dims
+            vectors.extend([list(zero_vector) for _ in batch])
+    return vectors
+
+
+def _call_embedding_provider(
+    *, model: ModelConfig, inputs: Sequence[str]
+) -> List[List[float]]:
+    sanitized_inputs, truncation_meta = _sanitize_embedding_inputs(inputs)
+    if not sanitized_inputs:
+        return []
+
+    provider = model.provider.lower()
+    if provider == "litellm":
+        vectors = _embedding_via_litellm(
+            model=model,
+            inputs=sanitized_inputs,
+            truncation_meta=truncation_meta,
+        )
+        target_dims = model.dims
+        return _normalise_vector_dimensions(
+            vectors=vectors,
+            target_dims=target_dims,
+            model_name=model.name,
+        )
+    if provider in {"tei", "text-embeddings-inference"}:
+        vectors = _embedding_via_tei(
+            model=model,
+            inputs=sanitized_inputs,
+            truncation_meta=truncation_meta,
+        )
+        target_dims = model.dims
+        return _normalise_vector_dimensions(
+            vectors=vectors,
+            target_dims=target_dims,
+            model_name=model.name,
+        )
+    if provider in {"ollama", "gateway"}:
+        gateway_alias = model.config.get("gateway_alias") or model.name
+        vectors = embed_code_texts(sanitized_inputs, gateway_alias=gateway_alias)
+        target_dims = model.dims
+        return _normalise_vector_dimensions(
+            vectors=vectors,
+            target_dims=target_dims,
+            model_name=model.name,
+        )
+    raise RuntimeError(
+        f"Unsupported embedding provider '{model.provider}' for model '{model.name}'"
+    )
+
+
+def _build_preview(inputs: Sequence[str]) -> List[Dict[str, object]]:
+    preview: List[Dict[str, object]] = []
+    for idx, text in enumerate(inputs[:3]):
+        snippet, truncated = _truncate_snippet(text)
+        preview.append(
+            {
+                "index": idx,
+                "length": len(text),
+                "snippet": snippet,
+                "truncated": truncated,
+            }
+        )
+    return preview
+
+
+def _log_embedding_event(
+    *,
+    logger,
+    tool: str,
+    payload: Dict[str, object],
+    status: str,
+) -> None:
+    if logger is None:
+        return
+    logger.log_event("llm_call", payload, tool=tool, status=status)
+
+
+def _embedding_via_litellm(
+    *,
+    model: ModelConfig,
+    inputs: Sequence[str],
+    truncation_meta: Sequence[Dict[str, object]],
+) -> List[List[float]]:
+    settings = get_settings()
+    base_url = (model.resolved_uri or settings.litellm_base_url).rstrip("/")
+    timeout = settings.litellm_timeout_seconds
+    headers = dict(settings.lite_llm_headers())
+    if settings.litellm_master_key and "Authorization" not in headers:
+        headers["Authorization"] = f"Bearer {settings.litellm_master_key}"
+    logger = get_current_run_logger()
+    log_payload: Dict[str, object] = {
+        "endpoint": "embeddings",
+        "model": model.identifier,
+        "input_count": len(inputs),
+        "input_preview": _build_preview(inputs),
+    }
+    if truncation_meta:
+        log_payload["truncated_inputs"] = list(truncation_meta)
+    start = perf_counter()
+    with httpx.Client(base_url=base_url, timeout=timeout) as client:
+        try:
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": model.identifier, "input": list(inputs)},
+                headers=headers or None,
+            )
+            response.raise_for_status()
+            data = response.json()
+            vectors = _extract_litellm_vectors(data)
+            if len(vectors) != len(inputs):
+                raise RuntimeError("Embedding count mismatch")
+            elapsed = round((perf_counter() - start) * 1000, 2)
+            log_payload.update(
+                {
+                    "status_code": response.status_code,
+                    "elapsed_ms": elapsed,
+                    "vector_dims": len(vectors[0]) if vectors else 0,
+                }
+            )
+            _log_embedding_event(logger=logger, tool="liteLLM", payload=log_payload, status="success")
+            return vectors
+        except Exception as exc:
+            elapsed = round((perf_counter() - start) * 1000, 2)
+            log_payload.update({"elapsed_ms": elapsed, "error": str(exc)})
+            _log_embedding_event(logger=logger, tool="liteLLM", payload=log_payload, status="error")
+            raise
+
+
+def _embedding_via_tei(
+    *,
+    model: ModelConfig,
+    inputs: Sequence[str],
+    truncation_meta: Sequence[Dict[str, object]],
+) -> List[List[float]]:
+    base_url = (model.resolved_uri or "").rstrip("/")
+    if not base_url:
+        raise RuntimeError(f"Model '{model.name}' missing TEI endpoint configuration")
+    settings = get_settings()
+    logger = get_current_run_logger()
+    log_payload: Dict[str, object] = {
+        "endpoint": f"{base_url}/embed",
+        "model": model.identifier,
+        "input_count": len(inputs),
+        "input_preview": _build_preview(inputs),
+    }
+    if truncation_meta:
+        log_payload["truncated_inputs"] = list(truncation_meta)
+    start = perf_counter()
+    with httpx.Client(base_url=base_url, timeout=settings.litellm_timeout_seconds) as client:
+        try:
+            response = client.post(
+                "/embed",
+                json={"inputs": list(inputs)},
+            )
+            response.raise_for_status()
+            data = response.json()
+            vectors = _extract_tei_vectors(data)
+            if len(vectors) != len(inputs):
+                raise RuntimeError("Embedding count mismatch")
+            elapsed = round((perf_counter() - start) * 1000, 2)
+            log_payload.update(
+                {
+                    "status_code": response.status_code,
+                    "elapsed_ms": elapsed,
+                    "vector_dims": len(vectors[0]) if vectors else 0,
+                }
+            )
+            _log_embedding_event(logger=logger, tool="tei", payload=log_payload, status="success")
+            return vectors
+        except Exception as exc:
+            elapsed = round((perf_counter() - start) * 1000, 2)
+            log_payload.update({"elapsed_ms": elapsed, "error": str(exc)})
+            _log_embedding_event(logger=logger, tool="tei", payload=log_payload, status="error")
+            raise
+
+
+def _extract_litellm_vectors(payload: Dict[str, object]) -> List[List[float]]:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise RuntimeError("LiteLLM embedding response missing data array")
+    vectors: List[List[float]] = []
+    for item in data:
+        if not isinstance(item, dict) or "embedding" not in item:
+            raise RuntimeError("LiteLLM embedding item missing embedding field")
+        vector = item.get("embedding")
+        if not isinstance(vector, list):
+            raise RuntimeError("LiteLLM embedding vector was not a list")
+        vectors.append([float(value) for value in vector])
+    return vectors
+
+
+def _extract_tei_vectors(payload: object) -> List[List[float]]:
+    if isinstance(payload, dict):
+        if "embeddings" in payload:
+            payload = payload["embeddings"]
+        elif "data" in payload:
+            payload = payload["data"]
+    if not isinstance(payload, list):
+        raise RuntimeError("TEI embedding response missing embeddings list")
+    vectors: List[List[float]] = []
+    for entry in payload:
+        if not isinstance(entry, list):
+            raise RuntimeError("TEI embedding vector was not a list")
+        vectors.append([float(value) for value in entry])
     return vectors
 
 
 def _batched(items: List[str], size: int) -> Iterator[List[str]]:
     for start in range(0, len(items), size):
         yield items[start : start + size]
-
-
-def _parse_summary_array(
-    response: str,
-    fallbacks: Sequence[str],
-    max_length: int,
-) -> List[str]:
-    try:
-        data = json.loads(response)
-    except json.JSONDecodeError:
-        LOGGER.warning("Failed to parse summary array, falling back to truncation")
-        return [summarize_with_gemini(text, max_length=max_length) for text in fallbacks]
-
-    if isinstance(data, dict) and "summaries" in data:
-        data = data.get("summaries")
-
-    if not isinstance(data, list):
-        LOGGER.warning("Summary payload was not a list: %s", data)
-        return [summarize_with_gemini(text, max_length=max_length) for text in fallbacks]
-
-    output: List[str] = []
-    for idx, (candidate, fallback) in enumerate(zip(data, fallbacks)):
-        summary = str(candidate) if candidate is not None else ""
-        summary = summary.strip()
-        if not summary:
-            summary = summarize_with_gemini(fallback, max_length=max_length)
-        elif len(summary) > max_length:
-            summary = summary[: max_length - 3].rstrip() + "..."
-        output.append(summary)
-
-    # If model returned fewer summaries than requested, fill remaining slots.
-    while len(output) < len(fallbacks):
-        fallback = fallbacks[len(output)]
-        output.append(summarize_with_gemini(fallback, max_length=max_length))
-
-    return output
 
 
 __all__ = [
@@ -450,3 +516,10 @@ __all__ = [
     "summarize_chunks_with_gemini",
     "summarize_with_gemini",
 ]
+@lru_cache(maxsize=1)
+def _fresh_ingestion():
+    """Lazy loader to avoid circular imports during container bootstrap."""
+
+    from src.freshbot.pipeline import ingestion as fresh_ingestion  # type: ignore
+
+    return fresh_ingestion

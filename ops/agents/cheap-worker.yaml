@@ -3,6 +3,6 @@ model: cheap-worker
 include_thoughts: false
 generation:
   response_mime_type: text/plain
-  max_output_tokens: 65536
+  max_output_tokens: 512
   thinking_mode: dynamic
-  thinking_budget_tokens: 32768
+  thinking_budget_tokens: 384

@@ -34,7 +34,7 @@ def test_database_tool_enforces_limits() -> None:
     ]
     client = StubMCPClient(MCPToolResponse(data=rows, structured=None, content=[], is_error=False))
     tool = DatabaseTool(max_results=2, snippet_chars=120, client=client, tool_name="db_search")
-    results = tool.search("agentic retrieval")
+    results = tool.search("agentic retrieval", scope=["kb.entries"])
     assert len(results) == 2
     for item in results:
         assert len(item.content) <= 120
@@ -45,6 +45,6 @@ def test_database_tool_enforces_limits() -> None:
 def test_database_tool_fallback_to_content() -> None:
     response = MCPToolResponse(data=None, structured=None, content=["Raw text block"], is_error=False)
     tool = DatabaseTool(max_results=1, snippet_chars=50, client=StubMCPClient(response), tool_name="db_search")
-    results = tool.search("fallback")
+    results = tool.search("fallback", scope=["kb.entries"])
     assert len(results) == 1
     assert results[0].content.startswith("Raw text block")

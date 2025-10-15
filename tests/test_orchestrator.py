@@ -32,7 +32,10 @@ class StubDatabaseTool:
         requirement: Requirement,
         *,
         limit: int | None = None,
+        scope: list[str] | None = None,
+        overrides: dict | None = None,
     ) -> ToolOutcome:
+        _ = scope, overrides
         query = task.inputs.get("query") if isinstance(task.inputs, dict) else None
         self.queries.append(query or task.description)
         evidence = self.items[: limit or len(self.items)]
@@ -191,7 +194,15 @@ class StubAgentRunner:
     def __init__(self) -> None:
         self.calls: list[PlanTask] = []
 
-    def execute(self, task: PlanTask, requirement: Requirement) -> ToolOutcome:
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement,
+        *,
+        scope: list[str] | None = None,
+        overrides: dict | None = None,
+    ) -> ToolOutcome:
+        _ = scope, overrides
         self.calls.append(task)
         evidence = [
             EvidenceItem(

@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
 from ..agents import AgentConfig, get_agent_config
-from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..schemas import AgentResponse, EvidenceItem, EvidencePack, Finding, OpenQuestion
 
@@ -28,12 +27,9 @@ class Responder:
     agent_config: AgentConfig | None = None
 
     def __post_init__(self) -> None:
-        settings = get_settings()
         if self.agent_config is None:
             self.agent_config = get_agent_config("responder")
-        model_aliases = settings.model_aliases()
-        model_key = self.agent_config.model if self.agent_config else self.model_name
-        target_model = model_aliases.get(model_key, model_key)
+        target_model = self.agent_config.model if self.agent_config else self.model_name
         if self.client is None:
             self.client = LLMClient(model_name=target_model)
 
@@ -56,19 +52,23 @@ class Responder:
         responder_client = self.client
         if responder_client is None:
             owns_client = True
-            settings = get_settings()
-            model_aliases = settings.model_aliases()
-            model_key = agent_config.model if agent_config else self.model_name
-            target_model = model_aliases.get(model_key, model_key)
+            target_model = agent_config.model if agent_config else self.model_name
             responder_client = LLMClient(model_name=target_model)
 
         try:
+            system_prompt_text = (
+                agent_config.system_prompt
+                if agent_config is not None
+                else None
+            )
             messages = _build_messages(
                 message,
                 evidence_pack,
                 findings,
                 acceptance_criteria,
                 open_questions or [],
+                system_prompt=system_prompt_text
+                or _PROMPT_PATH.read_text(encoding="utf-8").strip(),
             )
             if isinstance(responder_client, LLMClient):
                 response_text = responder_client.chat(
@@ -91,8 +91,9 @@ def _build_messages(
     findings: Sequence[Finding],
     acceptance: Sequence[str],
     open_questions: Sequence[OpenQuestion],
+    *,
+    system_prompt: str,
 ) -> Iterable[LLMMessage]:
-    system_prompt = _PROMPT_PATH.read_text(encoding="utf-8").strip()
     evidence_lines = _render_evidence(pack.items)
     finding_lines = _render_findings(findings)
     acceptance_lines = [f"- {item}" for item in acceptance] if acceptance else []

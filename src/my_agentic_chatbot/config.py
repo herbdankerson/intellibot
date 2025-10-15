@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     litellm_virtual_key: Optional[str] = Field(default=None, alias="LITELLM_VIRTUAL_KEY")
 
     database_url: str = Field(
-        default="postgresql://user:pass@localhost:5432/agentdb",
+        default="postgresql+psycopg://agent:agentpass@paradedb:5432/agentdb",
         alias="DATABASE_URL",
     )
 
@@ -132,17 +132,6 @@ class Settings(BaseSettings):
         if self.litellm_virtual_key:
             headers["Authorization"] = f"Bearer {self.litellm_virtual_key}"
         return headers
-
-    def model_aliases(self) -> Dict[str, str]:
-        """Return a mapping of logical model roles to provider model identifiers."""
-        from .runtime_config import get_runtime_config
-
-        runtime_config = get_runtime_config()
-        return {
-            "planner": runtime_config.active("active_planner_model").identifier,
-            "responder": runtime_config.active("active_responder_model").identifier,
-            "cheap-worker": runtime_config.active("active_worker_model").identifier,
-        }
 
     def resolve_path(self, relative_path: str) -> Path:
         """Resolve a repository-relative path to an absolute path."""

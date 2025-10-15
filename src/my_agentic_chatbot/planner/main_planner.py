@@ -8,8 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
-from ..agents import get_agent_catalog, get_agent_config, planner_tool_hints
-from ..config import get_settings
+from ..agents import AgentConfig, get_agent_catalog, get_agent_config, planner_tool_hints
 from ..constants import (
     DEFAULT_SEQUENTIAL_BUDGET_TOKENS,
     DEFAULT_SEQUENTIAL_TIMEOUT_SECONDS,
@@ -31,7 +30,8 @@ _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 _PROMPT_CACHE: Dict[str, str] = {}
 
 _JSON_ONLY_SUFFIX = (
-    "Return ONLY the JSON object. Do not wrap in Markdown. Ensure it conforms to the schema above."
+    "Return ONLY the JSON object. Do not wrap in Markdown. Use strict JSON syntax"
+    " (no trailing commas, comments, or additional narration)."
 )
 
 
@@ -50,33 +50,70 @@ def plan_from_message(
     if not normalized:
         raise ValueError("Planner requires a non-empty message")
 
+    agent_config = get_agent_config("planner")
     token = push_run_logger(logger) if logger is not None else None
-    planner_client, target_model = _resolve_client(model=model, client=client)
+    planner_client, target_model = _resolve_client(
+        model=model,
+        client=client,
+        agent_config=agent_config,
+    )
     owns_client = client is None
     try:
-        messages = _build_initial_messages(
+        base_messages = _build_initial_messages(
             normalized,
             prior_findings=prior_findings,
             prior_open_questions=prior_open_questions,
+            system_prompt=agent_config.system_prompt or _load_prompt("planner_system.md"),
         )
-        if logger is not None:
-            logger.log_event(
-                "planner_request",
-                {
-                    "model": target_model,
-                    "messages": [msg.as_dict() for msg in messages],
-                },
-            )
-        response = _chat(planner_client, messages)
-        if logger is not None:
-            logger.log_event("planner_response_raw", {"response": response})
+        attempt_messages = list(base_messages)
+        response = ""
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            if logger is not None:
+                logger.log_event(
+                    "planner_request",
+                    {
+                        "model": target_model,
+                        "messages": [msg.as_dict() for msg in attempt_messages],
+                        "attempt": attempt,
+                    },
+                )
+            response = _chat(planner_client, attempt_messages)
+            if logger is not None:
+                logger.log_event(
+                    "planner_response_raw",
+                    {"response": response, "attempt": attempt},
+                )
+            try:
+                payload = _parse_plan_response(response, fallback_problem_spec=normalized)
+                break
+            except ValueError:
+                if attempt == max_attempts:
+                    raise
+                LOGGER.warning(
+                    "Planner attempt %s produced invalid JSON; retrying. Snippet: %s",
+                    attempt,
+                    response[:400],
+                )
+                attempt_messages = list(base_messages)
+                attempt_messages.append(LLMMessage(role="assistant", content=response))
+                attempt_messages.append(
+                    LLMMessage(
+                        role="user",
+                        content=(
+                            "The previous reply was not valid JSON. Respond again with"
+                            " JSON that strictly matches the planner schema."
+                        ),
+                    )
+                )
+        else:  # pragma: no cover - defensive
+            payload = _parse_plan_response(response, fallback_problem_spec=normalized)
     finally:
         if owns_client:
             planner_client.close()
         if token is not None:
             reset_run_logger(token)
 
-    payload = _parse_plan_response(response, fallback_problem_spec=normalized)
     normalized_payload = _normalize_payload(payload, normalized)
     plan = Plan.model_validate(normalized_payload)
     if logger is not None:
@@ -96,7 +133,12 @@ def revise_plan_with_evidence(
 ) -> Plan:
     """Ask the planner to revise a plan after reviewing new findings."""
 
-    planner_client, target_model = _resolve_client(model=model, client=client)
+    agent_config = get_agent_config("planner")
+    planner_client, target_model = _resolve_client(
+        model=model,
+        client=client,
+        agent_config=agent_config,
+    )
     owns_client = client is None
     token = push_run_logger(logger) if logger is not None else None
     try:
@@ -105,6 +147,7 @@ def revise_plan_with_evidence(
             user_message=user_message,
             new_findings=new_findings,
             new_open_questions=new_open_questions,
+            system_prompt=agent_config.system_prompt or _load_prompt("planner_system.md"),
         )
         if logger is not None:
             logger.log_event(
@@ -132,13 +175,9 @@ def revise_plan_with_evidence(
 
 
 def _resolve_client(
-    *, model: str | None, client: LLMClient | None
+    *, model: str | None, client: LLMClient | None, agent_config: AgentConfig
 ) -> tuple[LLMClient, str]:
-    settings = get_settings()
-    agent_config = get_agent_config("planner")
-    model_aliases = settings.model_aliases()
-    model_key = model or agent_config.model
-    target_model = model_aliases.get(model_key, model_key)
+    target_model = model or agent_config.model
     if client is not None:
         return client, target_model
     return LLMClient(model_name=target_model), target_model
@@ -156,8 +195,8 @@ def _build_initial_messages(
     *,
     prior_findings: Sequence[Finding] | None,
     prior_open_questions: Sequence[OpenQuestion] | None,
+    system_prompt: str,
 ) -> List[LLMMessage]:
-    system_prompt = _load_prompt("planner_system.md")
     rubric_prompt = _load_prompt("rubrics.md")
     budget_guidance = (
         "Database budget: {db_tokens} tokens / {db_timeout}s. "
@@ -224,8 +263,8 @@ def _build_revision_messages(
     user_message: str,
     new_findings: Sequence[Finding],
     new_open_questions: Sequence[OpenQuestion] | None,
+    system_prompt: str,
 ) -> List[LLMMessage]:
-    system_prompt = _load_prompt("planner_system.md")
     schema_prompt = _schema_prompt()
     rubric_prompt = _load_prompt("rubrics.md")
 
@@ -276,19 +315,46 @@ def _parse_plan_response(response: str, *, fallback_problem_spec: str) -> Dict[s
     try:
         parsed = _extract_json_object(response)
     except ValueError as exc:
-        LOGGER.error("Failed to parse planner response", exc_info=exc)
+        try:
+            with open("/tmp/planner_failures.log", "a", encoding="utf-8") as handle:
+                handle.write(response)
+                handle.write("\n---\n")
+        except OSError:  # pragma: no cover - best effort
+            LOGGER.warning("Unable to write planner failure log")
+        LOGGER.error(
+            "Failed to parse planner response",
+            exc_info=exc,
+            extra={"planner_raw_response": response[:2000]},
+        )
+        LOGGER.error("Planner raw response snippet: %s", response[:2000])
         raise
     return parsed
 
 
+_TRAILING_COMMA_RE = re.compile(r",(?=\s*[}\]])")
+
+
+def _strip_trailing_commas(payload: str) -> str:
+    previous = None
+    current = payload
+    while previous != current:
+        previous = current
+        current = _TRAILING_COMMA_RE.sub("", current)
+    return current
+
+
 def _extract_json_object(raw: str) -> Dict[str, Any]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not match:
-            raise ValueError("Planner response does not contain valid JSON")
-        parsed = json.loads(match.group())
+    candidates = [raw, _strip_trailing_commas(raw)]
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        raise ValueError("Planner response does not contain valid JSON")
+    cleaned = _strip_trailing_commas(match.group())
+    parsed = json.loads(cleaned)
     if not isinstance(parsed, dict):
         raise ValueError("Planner response JSON must be an object")
     return parsed
@@ -411,7 +477,9 @@ def _normalize_tasks(
             item.get("description")
             or f"Investigate requirement {requirement_id}"
         ).strip()
-        tool = str(item.get("tool") or "db_keyword").strip()
+        tool = str(item.get("tool") or "db_search").strip()
+        if tool in {"db_keyword", "kb_search", "kb_lookup"}:
+            tool = "db_search"
         priority = item.get("priority")
         try:
             priority_value = int(priority)
@@ -477,7 +545,7 @@ def _normalize_tasks(
                 "id": "task-1",
                 "requirement_id": requirement_ids[0],
                 "description": f"Search the knowledge base for: {problem_spec}",
-                "tool": "db_keyword",
+                "tool": "db_search",
                 "priority": 1,
                 "budget_tokens": policies.DEFAULT_DB_BUDGET_TOKENS,
                 "timeout_seconds": policies.DEFAULT_DB_TIMEOUT_SECONDS,
@@ -602,12 +670,14 @@ def _normalize_dependencies(value: Any) -> List[str]:
         return []
     if isinstance(value, str):
         cleaned = value.strip()
-        return [cleaned] if cleaned else []
+        if not cleaned or cleaned.lower().startswith("req"):
+            return []
+        return [cleaned]
     if isinstance(value, list):
         result = []
         for dep in value:
             cleaned = str(dep).strip()
-            if cleaned:
+            if cleaned and not cleaned.lower().startswith("req"):
                 result.append(cleaned)
         return result
     return []

@@ -1,0 +1,5 @@
+1) List Additioinal Toolboxes (add Toolbox table, name, uuid, description, array of UUIDs of tools included)
+2) List Contents of Toolbox (name or uuid)
+3) Execute Tool (UUID required, tool id for single tool use or project id for automated flows - consider creating and using workflow id instead for auto flows. Consider a Execute, create, modify etc - copy of planning - workflow set of tools instead of adding complexity to this one)
+4) Search Tools (vector search scoped to tool descriptions and docs, returns recommended tools based on reference ids in docs and descriptions)
+Do the same for Agents - list, execute, search - execute is a single agent command, they can be chained as tools, for an agent to use tools you place it in front or ahead of a tool call, or assign it tools. all configs exposed as "knobs", make the agent toolbox extremely well documented and robust

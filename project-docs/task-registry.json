@@ -1,0 +1,147 @@
+{
+  "generated_at": "2025-10-13T00:00:00Z",
+  "tasks": [
+    {
+      "task_key": "TASK-ROOT",
+      "title": "Program backbone setup",
+      "status": "in_progress",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "unknown",
+      "notes": "Root umbrella task covering Prefect/Postgres alignment, MCP tooling, and Neo4j sync."
+    },
+    {
+      "task_key": "STEP-DB-PREFECT",
+      "title": "Point Prefect at ParadeDB",
+      "status": "complete",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [
+        "TASK-ROOT"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Prefect server now uses ParadeDB schema (prefect schema lives in dedicated user + schema); migrations applied via postgres superuser and service restarted."
+    },
+    {
+      "task_key": "STEP-CODE-VERIFY",
+      "title": "Smoke-test Prefect-backed ingestion",
+      "status": "complete",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-DB-PREFECT"
+      ],
+      "prefect_flow_run_id": "3da33d2f-a64a-42bc-9216-8320ffe81343",
+      "neo4j_sync_state": "not_applicable",
+      "notes": "add_task / mark_task_complete / upload_dag executed against Codex MCP, producing docs 8b83c287-4f7e-4363-8c04-adaa3ff9d83a and 229da8ff-f93a-4a37-9aab-a288df815925 with real embeddings + entries."
+    },
+    {
+      "task_key": "STEP-NEO4J-SYNC",
+      "title": "Sync task graph into Neo4j",
+      "status": "complete",
+      "priority": "medium",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-CODE-VERIFY"
+      ],
+      "prefect_flow_run_id": "4f126007-53d3-40c7-a597-be97acdbe40d",
+      "neo4j_sync_state": "completed",
+      "notes": "task-sync-neo4j/freshbot-task-graph-sync deployment registers task graph in Neo4j (PROJECT-CODEX nodes verified via bolt://localhost:7688)."
+    },
+    {
+      "task_key": "STEP-MCP-FORMALIZE",
+      "title": "Document MCP tool surface",
+      "status": "complete",
+      "priority": "medium",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-CODE-VERIFY"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "mcp/codex-mcp/README.md and freshbot/project-docs/codex-mcp.md now document the expanded task tool menu, Prefect deployments, and graph sync telemetry (task.graph_sync_runs); MCP manifest instructions mention task flows."
+    },
+    {
+      "task_key": "STEP-TESTS-OBSERVE",
+      "title": "Add integration tests & observability",
+      "status": "complete",
+      "priority": "medium",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-MCP-FORMALIZE",
+        "STEP-NEO4J-SYNC"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Added mcp/codex-mcp/tests/test_repository_task_flows.py (covers DAG upload success/failure, mark_complete dependency check, delete_task archiving) with pytest shim stubs; repository.upload_dag now records telemetry in task.graph_sync_runs for observability."
+    },
+    {
+      "task_key": "TASK-FLAG-REGISTRY",
+      "title": "Centralise flag management",
+      "status": "complete",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-MCP-FORMALIZE"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Applied ParadeDB migration to create cfg.flags and loaded defaults via freshbot.devtools.registry_loader --apply (providers/models/tools/agents/prompts/flags). Verified cfg.flags entries: is_chat, is_dev, is_document, is_note, needs_metadata, workspace_file."
+    },
+    {
+      "task_key": "TASK-DOC-INTAKE-TOOL",
+      "title": "Expose document intake MCP tool",
+      "status": "complete",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [
+        "STEP-MCP-FORMALIZE"
+      ],
+      "prefect_flow_run_id": "8724c576-8a6c-4ce8-bd0f-9b3bd06e6c07",
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Re-ran Prefect-backed ingestion for updated tool docs (prefect_flow_executor, tool_agent_catalog, tool_document_ingest, tool_search_tools) to exercise ingest_document path. Latest run `stimulating-goshawk` (flow-run/8724c576-8a6c-4ce8-bd0f-9b3bd06e6c07) completed with real embeddings after connector refresh."
+    },
+    {
+      "task_key": "TASK-SEARCH-REFERENCES",
+      "title": "Activate reference-aware search responses",
+      "status": "complete",
+      "priority": "medium",
+      "owner": "Codex",
+      "dependencies": [
+        "TASK-DOC-INTAKE-TOOL"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Reference resolver validated by re-ingesting tool docs so KB search now returns flag snapshots, backlinks, and related notes for tool UUIDs. Search endpoints verified against refreshed metadata (mcp/codex-mcp repository + server)."
+    },
+    {
+      "task_key": "TASK-EMO-GATE",
+      "title": "Skip emotion detection for code artefacts",
+      "status": "complete",
+      "priority": "medium",
+      "owner": "Codex",
+      "dependencies": [
+        "TASK-DOC-INTAKE-TOOL"
+      ],
+      "prefect_flow_run_id": "2269aee2-f57c-4fd3-9995-370bbb5e4f3f",
+      "neo4j_sync_state": "not_applicable",
+      "notes": "Updated freshbot.ingest pipeline to bypass detect_emotions_flow when domain=code; verified via Prefect run 0d4137f7-e158-4be8-bf62-308759cfd0ad showing skip log."
+    },
+    {
+      "task_key": "TASK-EMO-MODEL",
+      "title": "Route emotion analysis through LiteLLM classifiers",
+      "status": "complete",
+      "priority": "high",
+      "owner": "Codex",
+      "dependencies": [
+        "TASK-EMO-GATE"
+      ],
+      "prefect_flow_run_id": null,
+      "neo4j_sync_state": "not_applicable",
+      "notes": "freshbot.pipeline.ingestion.detect_emotions now calls emo-twitter and sent-twitter via connector_gemini_litellm; direct API smoke test inside api container returned structured joy/positive signals."
+    }
+  ]
+}

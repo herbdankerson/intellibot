@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from ..agents import AgentConfig, get_agent_config
-from ..config import get_settings
 from ..llm_calls.llm_client import LLMClient, LLMMessage
 from ..schemas import AgentResponse, AuditFinding, AuditReport, EvidenceItem, EvidencePack, Plan
 from ..util.text import squeeze_whitespace
@@ -38,10 +37,7 @@ class AuditAgent:
                 self._enabled = False
                 return
         if self.client is None and self._enabled:
-            settings = get_settings()
-            model_aliases = settings.model_aliases()
-            model_key = self.agent_config.model if self.agent_config else self.model_name
-            target_model = model_aliases.get(model_key, model_key)
+            target_model = self.agent_config.model if self.agent_config else self.model_name
             self.client = LLMClient(model_name=target_model)
 
     def evaluate(

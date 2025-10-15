@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 from functools import partial
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, Optional, cast
 
 import anyio
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from pydantic import BaseModel
 
 from .chat_store import persist_chat_transcript
 from .config import get_settings
@@ -22,6 +25,26 @@ from .response.responder import Responder
 from .run_logging import AgentRunLogger
 from .schemas import AgentResponse, IngestJobStatus, UrlIngestRequest, UserQuery
 from .workflows.orchestrator import WorkflowOrchestrator
+from .storage.connection import get_engine
+
+
+class FlowExecutionRequest(BaseModel):
+    deployment_name: str
+    parameters: Optional[Dict[str, Any]] = None
+    wait_for_completion: bool = False
+
+
+class FlowExecutionResponse(BaseModel):
+    deployment_name: str
+    state_name: str
+    state_type: str
+    flow_run_id: Optional[str] = None
+    result: Optional[Any] = None
+    result_error: Optional[str] = None
+
+
+FlowExecutionRequest.model_rebuild()
+FlowExecutionResponse.model_rebuild()
 
 
 def create_app() -> FastAPI:
@@ -37,10 +60,73 @@ def create_app() -> FastAPI:
 
     orchestrator = WorkflowOrchestrator(responder=Responder())
     ingestion_service = IngestionService()
+    engine = get_engine()
+
+    def _record_event(
+        raw: Dict[str, Any],
+        *,
+        run_id: Optional[str] = None,
+        session_id: Optional[uuid.UUID] = None,
+    ) -> None:
+        payload = {
+            "session_id": session_id,
+            "run_id": run_id,
+            "raw": json.dumps(raw),
+        }
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO agent.events (session_id, run_id, raw)
+                    VALUES (:session_id, :run_id, CAST(:raw AS JSONB))
+                    """
+                ),
+                payload,
+            )
+
+    def _create_session(agent_name: str, meta: Dict[str, Any] | None = None) -> uuid.UUID:
+        session_id = uuid.uuid4()
+        payload = {
+            "id": session_id,
+            "agent_name": agent_name,
+            "meta": json.dumps(meta or {}),
+        }
+        with engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO agent.sessions (id, agent_id, meta)
+                    SELECT :id, a.id, CAST(:meta AS JSONB)
+                    FROM cfg.agents AS a
+                    WHERE a.name = :agent_name
+                    """
+                ),
+                payload,
+            )
+            if result.rowcount == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Agent '{agent_name}' is not registered",
+                )
+        return session_id
+
+    def _jsonable(value: Any) -> Any:
+        try:
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            if hasattr(value, "model_dump"):
+                try:
+                    data = value.model_dump(mode="json")  # type: ignore[attr-defined]
+                    json.dumps(data)
+                    return data
+                except Exception:  # pragma: no cover - fall back to string
+                    return str(value)
+            return str(value)
 
     app = FastAPI(title="Agentic Chatbot", version="0.2.0")
 
-    def _run_pipeline(message: str) -> AgentResponse:
+    def _run_pipeline(message: str) -> tuple[AgentResponse, AgentRunLogger]:
         audit_model = None
         if orchestrator.audit_agent and orchestrator.audit_agent.agent_config:
             audit_model = orchestrator.audit_agent.agent_config.model
@@ -88,7 +174,7 @@ def create_app() -> FastAPI:
                 chat_ingest_item_id=ingest_item_id,
             )
 
-            return response
+            return response, run_logger
         except Exception as exc:  # pragma: no cover - defensive
             run_logger.finalize(success=False, metadata={"error": str(exc)})
             raise
@@ -101,7 +187,150 @@ def create_app() -> FastAPI:
 
     @app.post("/run", response_model=AgentResponse)
     def run(query: UserQuery) -> AgentResponse:
-        return _run_pipeline(query.message)
+        response, _ = _run_pipeline(query.message)
+        return response
+
+    @app.post("/chat", response_model=AgentResponse)
+    def chat(query: UserQuery) -> AgentResponse:
+        session_id = _create_session("default-chat", {"source": "api"})
+        try:
+            response, run_logger = _run_pipeline(query.message)
+        except Exception as exc:
+            _record_event(
+                {
+                    "event": "chat_error",
+                    "message": query.message,
+                    "error": str(exc),
+                },
+                session_id=session_id,
+            )
+            raise
+        _record_event(
+            {
+                "event": "chat_completed",
+                "message": query.message,
+                "run_id": str(run_logger.run_id),
+            },
+            run_id=str(run_logger.run_id),
+            session_id=session_id,
+        )
+        return response
+
+    @app.post("/logs/litellm")
+    def litellm_logs(payload: Dict[str, Any] = Body(...)) -> Dict[str, str]:
+        run_id = payload.get("metadata", {}).get("run_id")
+        session_id_value = payload.get("metadata", {}).get("session_id")
+        session_uuid: Optional[uuid.UUID] = None
+        if isinstance(session_id_value, str) and session_id_value:
+            try:
+                session_uuid = uuid.UUID(session_id_value)
+            except ValueError:
+                session_uuid = None
+        _record_event(
+            {"event": "litellm_callback", "payload": payload},
+            run_id=run_id,
+            session_id=session_uuid,
+        )
+        return {"status": "ok"}
+
+    @app.post("/freshbot/flows/execute", response_model=FlowExecutionResponse)
+    def execute_freshbot_flow(
+        request: FlowExecutionRequest = Body(...),
+    ) -> FlowExecutionResponse:
+        try:
+            from prefect.deployments import run_deployment
+            from prefect.exceptions import ObjectNotFound
+        except Exception as exc:  # pragma: no cover - Prefect missing
+            raise HTTPException(status_code=503, detail=f"Prefect unavailable: {exc}") from exc
+
+        run_kwargs = {
+            "name": request.deployment_name,
+            "parameters": request.parameters or {},
+        }
+        use_return_state = bool(request.wait_for_completion)
+        if use_return_state:
+            run_kwargs["return_state"] = True
+
+        try:
+            flow_run = run_deployment(**run_kwargs)
+        except ObjectNotFound as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Deployment '{request.deployment_name}' not found",
+            ) from exc
+        except TypeError:
+            use_return_state = False
+            flow_run = run_deployment(
+                name=request.deployment_name,
+                parameters=request.parameters or {},
+            )
+
+        result_value: Optional[Any] = None
+        result_error: Optional[str] = None
+        state_obj: Optional[Any]
+        state_name: Optional[str] = None
+        state_type: Optional[str] = None
+        flow_run_id: Optional[str] = None
+
+        if use_return_state and hasattr(flow_run, "result"):
+            state_obj = flow_run
+            details = getattr(flow_run, "state_details", None)
+            flow_run_id = getattr(details, "flow_run_id", None)
+            state_name = getattr(flow_run, "name", None)
+            state_type_obj = getattr(flow_run, "type", None)
+            if state_type_obj is not None:
+                state_type = getattr(state_type_obj, "value", None) or str(state_type_obj)
+        else:
+            state_obj = getattr(flow_run, "state", None)
+            flow_run_id = getattr(flow_run, "id", None) or getattr(flow_run, "flow_run_id", None)
+            state_name = cast(Optional[str], getattr(flow_run, "state_name", None))
+            if not state_name and state_obj is not None:
+                state_name = getattr(state_obj, "name", None)
+            state_type_obj = getattr(flow_run, "state_type", None)
+            if state_type_obj is not None:
+                state_type = getattr(state_type_obj, "value", None) or str(state_type_obj)
+            elif state_obj is not None:
+                fallback_type = getattr(state_obj, "type", None)
+                if fallback_type is not None:
+                    state_type = getattr(fallback_type, "value", None) or str(fallback_type)
+
+        if request.wait_for_completion and state_obj is not None:
+            try:
+                result_value = _jsonable(state_obj.result())
+            except Exception as exc:  # pragma: no cover - Prefect surfaces runtime errors
+                result_error = str(exc)
+
+        return FlowExecutionResponse(
+            deployment_name=request.deployment_name,
+            state_name=state_name or "unknown",
+            state_type=state_type or "unknown",
+            flow_run_id=str(flow_run_id) if flow_run_id else None,
+            result=result_value,
+            result_error=result_error,
+        )
+
+    @app.post("/approve/{task_id}")
+    def approve_task(task_id: uuid.UUID) -> Dict[str, str]:
+        with engine.begin() as connection:
+            result = connection.execute(
+                text(
+                    """
+                    UPDATE agent.tasks
+                    SET status = 'approved', resolved_at = NOW()
+                    WHERE id = :task_id
+                    """
+                ),
+                {"task_id": task_id},
+            )
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Task not found")
+        _record_event(
+            {
+                "event": "task_approved",
+                "task_id": str(task_id),
+            },
+        )
+        return {"status": "approved", "task_id": str(task_id)}
 
     @app.post("/api/v1/documents/upload", response_model=IngestJobStatus)
     async def upload_document(
@@ -189,7 +418,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail="messages must be a list")
 
         user_message = _extract_user_message(messages)
-        agent_response = _run_pipeline(user_message)
+        agent_response, _ = _run_pipeline(user_message)
 
         created = int(time.time())
         completion_id = f"chatcmpl-{uuid.uuid4()}"

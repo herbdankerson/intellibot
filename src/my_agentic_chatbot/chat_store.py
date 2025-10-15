@@ -23,10 +23,10 @@ from etl.tasks.model_clients import (
     summarize_chunks_with_gemini,
     summarize_with_gemini,
 )
-from etl.tasks.intake_tasks import persist_results
+from etl.tasks.intake_tasks import build_chunk_emotions, persist_results
 
 from .schemas import AgentResponse, EvidencePack, Plan
-from .storage.db import get_engine
+from .storage.connection import get_engine
 from .runtime_config import get_runtime_config
 
 LOGGER = logging.getLogger(__name__)
@@ -139,8 +139,43 @@ def persist_chat_transcript(
 
         embeddings = _build_embeddings(item, chunks, domain=domain)
         abstractions = _build_abstractions(chunks)
+        chunk_emotions = build_chunk_emotions(chunks)
 
-        report = persist_results.fn(item, document, chunks, embeddings, abstractions)
+        report = persist_results.fn(
+            item,
+            document,
+            chunks,
+            embeddings,
+            chunk_emotions,
+            abstractions,
+        )
+
+        entry_ids = report.metadata.get("entry_ids") if isinstance(report.metadata, dict) else None
+        if entry_ids:
+            extra_meta = {
+                "chat": {
+                    "run_id": str(run_id),
+                    "confidence": response.confidence,
+                    "citations": response.citations,
+                }
+            }
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE kb.entries
+                        SET session_id = :session_id,
+                            meta = meta || CAST(:extra_meta AS JSONB)
+                        WHERE id = ANY(:entry_ids)
+                        """
+                    ),
+                    {
+                        "session_id": str(run_id),
+                        "extra_meta": json.dumps(extra_meta),
+                        "entry_ids": list(map(str, entry_ids)),
+                    },
+                )
+
         LOGGER.info(
             "Persisted chat transcript %s as ingest item %s",
             run_id,

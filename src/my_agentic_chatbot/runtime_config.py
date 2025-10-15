@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 
 from sqlalchemy import text
 
-from .storage.db import get_engine
+from .storage.connection import get_engine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -119,27 +119,29 @@ def _fetch_models(connection, env: Mapping[str, str]) -> Dict[str, ModelConfig]:
     rows = connection.execute(
         text(
             """
-            SELECT name, provider, identifier, uri_template, dims, purpose, enabled,
-                   version, notes, COALESCE(config, '{}'::jsonb) AS config
-            FROM cfg.models
+            SELECT m.alias, m.name AS identifier, m.endpoint, m.purpose, m.dims,
+                   m.enabled, COALESCE(m.default_params, '{}'::jsonb) AS params,
+                   p.slug AS provider_slug
+            FROM cfg.models AS m
+            JOIN cfg.providers AS p ON p.id = m.provider_id
             """
         )
     ).mappings()
     models: Dict[str, ModelConfig] = {}
     for row in rows:
-        name = row["name"].strip()
-        models[name] = ModelConfig(
-            name=name,
-            provider=row["provider"].strip(),
+        alias = (row.get("alias") or row["identifier"]).strip()
+        models[alias] = ModelConfig(
+            name=alias,
+            provider=row["provider_slug"].strip(),
             identifier=row["identifier"].strip(),
-            uri_template=row["uri_template"],
-            resolved_uri=_resolve_template(row["uri_template"], env),
-            dims=row["dims"],
-            purpose=row["purpose"].strip(),
-            enabled=bool(row["enabled"]),
-            version=row["version"],
-            notes=row["notes"],
-            config=dict(row["config"] or {}),
+            uri_template=row.get("endpoint"),
+            resolved_uri=_resolve_template(row.get("endpoint"), env),
+            dims=row.get("dims"),
+            purpose=(row.get("purpose") or "chat").strip(),
+            enabled=bool(row.get("enabled")),
+            version=None,
+            notes=None,
+            config=dict(row.get("params") or {}),
         )
     if not models:
         raise RuntimeError("cfg.models is empty; runtime configuration cannot continue")
@@ -150,26 +152,26 @@ def _fetch_tools(connection, env: Mapping[str, str]) -> Dict[str, ToolConfig]:
     rows = connection.execute(
         text(
             """
-            SELECT name, type, endpoint_template, method, auth_ref, timeout_s,
-                   COALESCE(config, '{}'::jsonb) AS config, enabled
+            SELECT slug, kind, manifest_or_ref, default_params, enabled
             FROM cfg.tools
             """
         )
     ).mappings()
     tools: Dict[str, ToolConfig] = {}
     for row in rows:
-        name = row["name"].strip()
-        template = row["endpoint_template"]
+        name = row["slug"].strip()
+        template = row["manifest_or_ref"]
         resolved = _resolve_template(template, env)
+        params = dict(row.get("default_params") or {})
         tools[name] = ToolConfig(
             name=name,
-            type=row["type"].strip(),
+            type=row["kind"].strip(),
             endpoint_template=template,
             resolved_endpoint=resolved,
-            method=row["method"].strip(),
-            auth_ref=row["auth_ref"],
-            timeout_s=row["timeout_s"],
-            config=dict(row["config"] or {}),
+            method=str(params.get("method", "POST")),
+            auth_ref=params.get("auth_ref"),
+            timeout_s=params.get("timeout"),
+            config=params,
             enabled=bool(row["enabled"]),
         )
     return tools
@@ -199,10 +201,20 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
 
     env_map = env or os.environ
     engine = get_engine()
-    with engine.connect() as connection:
-        active_map = _fetch_active_map(connection)
-        models = _fetch_models(connection, env_map)
-        tools = _fetch_tools(connection, env_map)
+    try:
+        with engine.connect() as connection:
+            active_map = _fetch_active_map(connection)
+            models = _fetch_models(connection, env_map)
+            tools = _fetch_tools(connection, env_map)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        LOGGER.error(
+            "Failed to load runtime configuration from database",
+            exc_info=exc,
+        )
+        raise RuntimeError(
+            "Unable to load runtime configuration. Ensure Postgres is reachable and"
+            " cfg.* tables are seeded."
+        ) from exc
     active_models = _build_active_models(active_map, models)
     LOGGER.info(
         "Runtime configuration loaded",
@@ -267,3 +279,8 @@ def get_tool_config(name: str) -> ToolConfig:
     if not tool.enabled:
         raise RuntimeError(f"Tool '{name}' is disabled in cfg.tools")
     return tool
+
+
+# The runtime configuration must be sourced from the live database. Static
+# fallbacks previously used for offline tests were intentionally removed to make
+# configuration drift immediately visible during startup.

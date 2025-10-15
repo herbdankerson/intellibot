@@ -1,0 +1,1 @@
+ok so now lets focus on tools and agents - how are they currently executed? just python files with @flow decorators? agents same? agent registry is actively used in the db? models dynamically assigned, also stored in db? a single gateway flow for each provider/api service/source to handle traffic? 

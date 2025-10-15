@@ -14,7 +14,7 @@ sys.path.append(str(BASE_DIR))
 
 from src.my_agentic_chatbot.config import get_settings
 from src.my_agentic_chatbot.runtime_config import ModelConfig, get_runtime_config
-from src.my_agentic_chatbot.storage.db import get_engine
+from src.my_agentic_chatbot.storage.connection import get_engine
 
 
 def ensure_space(model_cfg: ModelConfig) -> int:

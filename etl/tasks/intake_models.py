@@ -27,6 +27,7 @@ class IngestItem:
     domain_confidence: Optional[float] = None
     document_summary: Optional[str] = None
     chunk_summaries: Dict[int, str] = field(default_factory=dict)
+    is_dev: bool = False
 
     def with_domain(self, domain: str, confidence: Optional[float]) -> "IngestItem":
         clone = self.copy()
@@ -62,6 +63,7 @@ class IngestItem:
             domain_confidence=self.domain_confidence,
             document_summary=self.document_summary,
             chunk_summaries=dict(self.chunk_summaries),
+            is_dev=self.is_dev,
         )
 
 
@@ -99,6 +101,7 @@ class Chunk:
     overlap_tokens: int
     ner_entities: List[Dict[str, Any]] = field(default_factory=list)
     summary: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -137,4 +140,5 @@ def new_ingest_item(
         source_uri=source_uri,
         display_name=display_name,
         metadata=metadata or {},
+        is_dev=bool((metadata or {}).get("is_dev", False)),
     )

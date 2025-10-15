@@ -1,71 +1,76 @@
 # Project Overview
 
-This repository hosts the agentic chatbot runtime that now relies on the Microsoft Agent Framework for orchestration.  The stack is container-first: all runtime services are meant to be launched through Docker Compose, while the Python virtual environment is only needed for local testing and utility scripts.
+Agentic chatbot runtime prefect orchestration and hybrid BM25/vector search over ParadeDB. Everything assumes you are operating from inside the Docker Compose stack.
 
 ## Running the stack
 
-1. Copy `.env.example` to `.env` and fill in provider keys (e.g., `GOOGLE_API_KEY`, `LITELLM_VIRTUAL_KEY`).
-2. Start the services from the repository root:
+1. Copy `.env.example` to `.env` and populate provider/API keys. Leave the database host set to `paradedb` unless you are deliberately pointing at an external Postgres instance.
+2. Start services from the repo root:
 
    ```bash
    docker compose up -d
    ```
 
-   The compose file builds the API image from the local source tree and mounts the repo into the container for live reloads.
+   The compose build mounts the source tree into the `api` container for live reloads.
 
-3. Confirm the API is reachable at `http://localhost:8800/health`.  LiteLLM is exposed on `http://localhost:4000`, and the SearxNG instance is available at `http://localhost:8085`.
+3. Shell into `api` for all runtime commands (tests, Prefect flows, psql, scripts):
+
+   ```bash
+   docker compose exec api bash
+   ```
+
+4. Confirm key services:
+   - API health: `curl -f http://localhost:8800/health`
+   - ParadeDB reachable and `pg_search` loaded: `psql $DATABASE_URL -c "SELECT extname FROM pg_extension WHERE extname = 'pg_search';"`
+   - LiteLLM embeddings: `python ops/scripts/check_embeddings.py --model emb-general` (see script help)
 
 ### Key services
 
 | Service | Purpose | Host port |
 | --- | --- | --- |
-| `api` | FastAPI app running the Agent Framework workflow | 8800 |
-| `paradedb` | Primary Postgres + pgvector store for KB and staging tables | 5432 |
-| `litellm` | Gateway for model calls (chat + embeddings) | 4000 |
-| `openai-proxy` | Local OpenAI-compatible proxy in front of LiteLLM | 5001 |
-| `prefect` | Prefect Orion API for ETL flows | 4200 |
-| `openwebui` | Browser UI that talks to the proxy, optional | 3000 |
-| `searxng` | Metasearch engine feeding the web curation pipeline | 8085 |
-| `docling` | Document conversion microservice used by ingestion | 8000 |
+| `api` | FastAPI runtime + Prefect tasks | 8800 |
+| `paradedb` | Postgres + pgvector + pg_search (BM25) | 5432 |
+| `litellm` | Chat + embedding proxy | 4000 |
+| `openai-proxy` | OpenAI-compatible shim over LiteLLM | 5001 |
+| `prefect` | Prefect Orion API | 4200 |
+| `docling` | Document conversion microservice | 8000 |
+| `searxng` | Metasearch for web enrichment | 8085 |
+| `openwebui` | Optional browser UI | 3000 |
 
-Additional MCP sidecars (Playwright, ParadeDB, Neo4j) start with the same command; see `docker-compose.yml` for the full inventory and exposed ports.
+Additional MCP sidecars (Playwright, ParadeDB MCP, Neo4j) are defined in `docker-compose.yml` and start with the same command.
+
+## Container-first workflow
+
+- Always execute scripts/tests inside the `api` container so DNS (`paradedb`) and shared volumes resolve correctly.
+- Use the shared connection helper (`src/my_agentic_chatbot/storage/connection.py`) whenever code needs ParadeDB access. Direct DSNs in modules are prohibited.
+- Prefect flows, ingestion scripts, and runtime services share the same environment variables sourced from `.env`.
 
 ## Database details
 
-- **Engine**: ParadeDB (Postgres 15 + pgvector)
-- **Connection string**: `postgresql://agent:agentpass@localhost:5432/agentdb`
-- **Schema highlights**:
-  - `kb.documents`, `kb.chunks`, `kb.document_embeddings`, `kb.chunk_embeddings`
-  - `agent.web_work_items` staging table for curated web captures
-  - `agent.events` for LiteLLM call logs
+- **Engine**: ParadeDB (Postgres 15, pgvector, pg_search)
+- **Internal connection string**: `postgresql://agent:agentpass@paradedb:5432/agentdb`
+- **Mandatory extensions**: `vector`, `pg_search` (BM25). The bm25 index lives in the `pg_search` extension; queries rely on `paradedb.match`/`paradedb.score`.
+- **Core schemas**:
+  - `kb.ingest_items` – tracking of ingestion runs and status
+  - `kb.documents`, `kb.chunks` – versioned canonical content + chunk breakdowns
+  - `kb.document_embeddings`, `kb.chunk_embeddings` – per-space vectors
+  - `kb.entries` – hybrid search surface (linked back to documents/chunks)
+  - `cfg.*` – runtime model/tool/agent configuration
 
-### Migrations and seeding
-
-Run the helper scripts from the host machine (requires the virtual environment):
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python ops/scripts/migrate.py
-python ops/scripts/ingest_docs.py path/to/docs
-python ops/scripts/embed_chunks.py --space emb-general
-```
-
-Re-run the embedding script whenever new documents land in the KB.
+Ingestion, deduplication, and re-run semantics are captured in `project-docs/ingestion-flow.md`.
 
 ## Development workflow
 
-- Use the containers for runtime tasks.  The local virtual environment is optional and only needed when running unit tests or maintenance scripts.
-- Run tests with `pytest` (either inside the `api` container or from the host after activating the venv).
-- Logs from model calls are captured in `agent.events`; other service logs can be tailed with `docker compose logs -f <service>`.
+- Preferred path: `docker compose exec api pytest` or run Prefect tasks from inside the container. Host virtualenvs are optional and should only be used when you intentionally target remote infrastructure.
+- Logs: application (`docker compose logs -f api`), LiteLLM (`litellm` service), Prefect (`prefect` service), Docling (`docling` service).
+- Database troubleshooting: `psql $DATABASE_URL` inside `api`. The schema auto-patches required columns on first ingest run.
 
 ## Credentials and access
 
-The default credentials defined in `docker-compose.yml` are intended for local development only:
+The compose file ships with development-only defaults:
 
-- ParadeDB/Postgres: user `agent`, password `agentpass`, database `agentdb`
-- Neo4j: set `NEO4J_USER`, `NEO4J_PASSWORD`, and `NEO4J_DATABASE` in `.env`
-- LiteLLM: `LITELLM_MASTER_KEY` and `LITELLM_VIRTUAL_KEY` default to `changeme-*` placeholders
+- ParadeDB/Postgres: `agent` / `agentpass` / `agentdb`
+- LiteLLM master/virtual keys: `changeme-*`
+- Neo4j placeholders in `.env`
 
-Always override these values in production and restrict exposed ports if the stack is deployed beyond localhost.
+Override these values for any non-local deployment and restrict exposed ports as needed.

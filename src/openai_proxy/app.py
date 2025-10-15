@@ -1,31 +1,51 @@
-"""OpenAI-compatible FastAPI proxy that forwards calls to LiteLLM."""
+"""OpenAI-compatible FastAPI proxy that forwards calls to a configurable backend."""
 
 from __future__ import annotations
 
-import json
 import os
-import time
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Dict
+from typing import AsyncIterator, Dict
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+
+
+def _normalise_prefix(prefix: str) -> str:
+    cleaned = prefix.strip()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("/"):
+        cleaned = f"/{cleaned}"
+    return cleaned.rstrip("/")
+
 
 def _resolve_base_url() -> str:
-    for env_name in ("LITELLM_ROUTER_BASE_URL", "LITELLM_BASE_URL"):
+    for env_name in ("OPENAI_PROXY_TARGET_URL", "LITELLM_ROUTER_BASE_URL", "LITELLM_BASE_URL"):
         value = os.getenv(env_name)
         if value:
             return value
     raise RuntimeError(
-        "LiteLLM base URL is not configured; set LITELLM_ROUTER_BASE_URL or LITELLM_BASE_URL"
+        "Proxy target URL is not configured; set OPENAI_PROXY_TARGET_URL (or LITELLM_ROUTER_BASE_URL/LITELLM_BASE_URL)."
     )
 
 
 DEFAULT_BASE_URL = _resolve_base_url()
 DEFAULT_TIMEOUT = float(os.getenv("OPENAI_PROXY_TIMEOUT", os.getenv("LITELLM_TIMEOUT_SECONDS", "60")))
-DEFAULT_VIRTUAL_KEY = os.getenv("LITELLM_VIRTUAL_KEY")
-ROUTER_PREFIX = os.getenv("OPENAI_PROXY_PREFIX", "/v1")
+DEFAULT_VIRTUAL_KEY = os.getenv("OPENAI_PROXY_DEFAULT_KEY", os.getenv("LITELLM_VIRTUAL_KEY"))
+ROUTER_PREFIX = _normalise_prefix(os.getenv("OPENAI_PROXY_PREFIX", ""))
+
+EXCLUDED_REQUEST_HEADERS = {"host", "content-length"}
+HOP_BY_HOP_RESPONSE_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
+SUPPORTED_HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
 
 @asynccontextmanager
@@ -33,125 +53,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialise a shared HTTPX client and tear it down on shutdown."""
 
     async with httpx.AsyncClient(base_url=DEFAULT_BASE_URL, timeout=DEFAULT_TIMEOUT) as client:
-        app.state.litellm_client = client
+        app.state.proxy_client = client
         yield
 
 
-app = FastAPI(title="LiteLLM OpenAI Proxy", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="OpenAI Pass-through Proxy", version="0.2.0", lifespan=lifespan)
 
 
 def _build_forward_headers(request: Request) -> Dict[str, str]:
     headers: Dict[str, str] = {}
-    if "content-type" in request.headers:
-        headers["content-type"] = request.headers["content-type"]
-    if "accept" in request.headers:
-        headers["accept"] = request.headers["accept"]
+    saw_auth = False
+    for key, value in request.headers.items():
+        lowered = key.lower()
+        if lowered in EXCLUDED_REQUEST_HEADERS:
+            continue
+        if lowered == "authorization":
+            saw_auth = True
+        headers[key] = value
 
-    incoming_auth = request.headers.get("authorization")
-    if incoming_auth:
-        headers["authorization"] = incoming_auth
-    elif DEFAULT_VIRTUAL_KEY:
-        headers["authorization"] = f"Bearer {DEFAULT_VIRTUAL_KEY}"
-
-    if request.headers.get("x-request-id"):
-        headers["x-request-id"] = request.headers["x-request-id"]
+    if not saw_auth and DEFAULT_VIRTUAL_KEY:
+        headers["Authorization"] = f"Bearer {DEFAULT_VIRTUAL_KEY}"
 
     return headers
 
 
-async def _forward_json(method: str, path: str, request: Request, payload: Dict[str, Any]) -> Response:
-    client: httpx.AsyncClient = request.app.state.litellm_client
+def _filter_response_headers(headers: httpx.Headers) -> Dict[str, str]:
+    filtered: Dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() in HOP_BY_HOP_RESPONSE_HEADERS:
+            continue
+        filtered[key] = value
+    return filtered
+
+
+async def _forward_request(request: Request, target_path: str) -> Response:
+    client: httpx.AsyncClient = request.app.state.proxy_client
     headers = _build_forward_headers(request)
-    url = f"{ROUTER_PREFIX}{path}"
-    resp = await client.request(method, url, headers=headers, json=payload)
-    if resp.status_code >= 400:
-        detail = resp.text
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+    body = await request.body()
+    url = f"{ROUTER_PREFIX}{target_path}"
+    content = body if body else None
+
+    resp = await client.request(
+        request.method,
+        url or "/",
+        headers=headers,
+        content=content,
+        params=request.query_params,
+    )
+
+    response_headers = _filter_response_headers(resp.headers)
+    media_type = resp.headers.get("content-type")
     return Response(
         content=resp.content,
         status_code=resp.status_code,
-        media_type=resp.headers.get("content-type", "application/json"),
-        headers={k: v for k, v in resp.headers.items() if k.lower().startswith("x-")},
+        headers=response_headers,
+        media_type=media_type,
     )
-
-
-async def _forward_get(path: str, request: Request) -> Response:
-    client: httpx.AsyncClient = request.app.state.litellm_client
-    headers = _build_forward_headers(request)
-    url = f"{ROUTER_PREFIX}{path}"
-    resp = await client.get(url, headers=headers, params=request.query_params)
-    if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        media_type=resp.headers.get("content-type", "application/json"),
-        headers={k: v for k, v in resp.headers.items() if k.lower().startswith("x-")},
-    )
-
-
-def _as_sse_payload(completion: Dict[str, Any]) -> AsyncIterator[bytes]:
-    """Convert a LiteLLM JSON completion into OpenAI-style streaming SSE events."""
-
-    response_id = completion.get("id", f"chatcmpl-{int(time.time())}")
-    model = completion.get("model", "")
-    created = completion.get("created", int(time.time()))
-    choices = completion.get("choices", [])
-
-    def encode(event: Dict[str, Any]) -> bytes:
-        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
-
-    async def generator() -> AsyncIterator[bytes]:
-        initial = {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-        }
-        yield encode(initial)
-
-        content = ""
-        finish_reason = "stop"
-        if choices:
-            first_choice = choices[0]
-            message = first_choice.get("message") or {}
-            content = message.get("content", "")
-            finish_reason = first_choice.get("finish_reason", "stop")
-
-        if content:
-            chunk = {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": content},
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield encode(chunk)
-
-        final = {
-            "id": response_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": finish_reason,
-                }
-            ],
-        }
-        yield encode(final)
-        yield b"data: [DONE]\n\n"
-
-    return generator()
 
 
 @app.get("/healthz")
@@ -159,47 +116,19 @@ async def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/v1/models")
-async def list_models(request: Request) -> Response:
-    return await _forward_get("/models", request)
+@app.api_route("/openai/verify", methods=["GET", "POST"])
+@app.api_route("/v1/openai/verify", methods=["GET", "POST"])
+async def openai_verify() -> Dict[str, str]:
+    """Return a static OK response for compatibility checks."""
+
+    return {"status": "ok"}
 
 
-@app.post("/v1/embeddings")
-async def create_embeddings(request: Request) -> Response:
-    payload = await request.json()
-    return await _forward_json("POST", "/embeddings", request, payload)
+@app.api_route("/v{version}/{path:path}", methods=SUPPORTED_HTTP_METHODS)
+async def proxy_versioned(version: str, path: str, request: Request) -> Response:
+    if version not in {"1", "2"}:
+        raise HTTPException(status_code=404, detail="Unsupported API version")
 
-
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: Request) -> Response:
-    payload = await request.json()
-    stream = bool(payload.get("stream"))
-    if stream:
-        forwarded_payload = {**payload, "stream": False}
-        client: httpx.AsyncClient = request.app.state.litellm_client
-        headers = _build_forward_headers(request)
-        url = f"{ROUTER_PREFIX}/chat/completions"
-        resp = await client.post(url, headers=headers, json=forwarded_payload)
-        if resp.status_code >= 400:
-            raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        completion = resp.json()
-        return StreamingResponse(
-            _as_sse_payload(completion),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache"},
-        )
-
-    return await _forward_json("POST", "/chat/completions", request, payload)
-
-
-@app.post("/v1/completions")
-async def legacy_completions(request: Request) -> Response:
-    payload = await request.json()
-    return await _forward_json("POST", "/completions", request, payload)
-
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
-    detail = exc.detail if isinstance(exc.detail, (str, dict)) else str(exc.detail)
-    body = {"error": {"message": detail, "type": "proxy_error", "code": exc.status_code}}
-    return JSONResponse(status_code=exc.status_code, content=body)
+    suffix = f"/{path}" if path else ""
+    target_path = f"/v{version}{suffix}"
+    return await _forward_request(request, target_path)

@@ -34,6 +34,10 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
+markers = [
+    "slow: integration test requiring running compose services"
+]
+
 testpaths = ["tests"]
 
 [tool.black]

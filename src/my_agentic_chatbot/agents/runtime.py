@@ -9,10 +9,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from ..config import get_settings
 from ..constants import MAX_EVIDENCE_ITEMS, MAX_SNIPPET_CHARS
 from ..llm_calls.llm_client import LLMClient, LLMMessage
-from ..schemas import EvidenceItem, PlanTask
+from ..schemas import EvidenceItem, PlanTask, Requirement
 from ..util.text import build_snippet, deduplicate_items
 from . import AgentConfig, AgentDescriptor
 
@@ -40,13 +39,16 @@ class CustomAgentRunner:
 
     def __post_init__(self) -> None:
         if self.client is None:
-            settings = get_settings()
-            model_aliases = settings.model_aliases()
             model_key = self.agent_config.model
-            target_model = model_aliases.get(model_key, model_key)
+            target_model = model_key
             self.client = LLMClient(model_name=target_model)
 
-    def execute(self, task: PlanTask) -> List[EvidenceItem]:
+    def execute(
+        self,
+        task: PlanTask,
+        requirement: Requirement | None = None,
+        **_: Any,
+    ) -> List[EvidenceItem]:
         if self.client is None:  # pragma: no cover - defensive guard
             raise RuntimeError("Custom agent runner has no LLM client configured")
 
