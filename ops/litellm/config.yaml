@@ -1,0 +1,128 @@
+litellm_settings:
+  drop_params: true
+
+router_settings:
+  num_retries: 4
+
+model_list:
+  - model_name: planner
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0
+  - model_name: planner-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0
+  - model_name: responder
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: responder-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: cheap-worker
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: worker-gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: ${GOOGLE_API_KEY}
+      custom_llm_provider: gemini
+      temperature: 0.2
+  - model_name: emb-general
+    litellm_params:
+      model: thenlper/gte-large
+      api_base: ${TEI_GTE_LARGE_URL}
+      custom_llm_provider: openai
+      api_key: ${TEI_GTE_LARGE_API_KEY:-dummy-tei-token}
+  - model_name: emb-legal
+    litellm_params:
+      model: nlpaueb/legal-bert-base-uncased
+      api_base: ${TEI_LEGAL_BERT_URL}
+      custom_llm_provider: openai
+      api_key: ${TEI_LEGAL_BERT_API_KEY:-dummy-tei-token}
+  - model_name: emb-code
+    litellm_params:
+      model: thenlper/gte-large
+      api_base: ${TEI_GTE_LARGE_URL}
+      custom_llm_provider: openai
+      api_key: ${TEI_GTE_LARGE_API_KEY:-dummy-tei-token}
+  - model_name: voyage-law-2
+    litellm_params:
+      model: voyage-law-2
+      api_base: ${VOYAGE_API_BASE_URL}
+      custom_llm_provider: voyage
+  - model_name: voyage-2
+    litellm_params:
+      model: voyage-2
+      api_base: ${VOYAGE_API_BASE_URL}
+      custom_llm_provider: voyage
+  - model_name: smollm2-1.7b
+    litellm_params:
+      model: smollm2:1.7b
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: local-assistant
+    litellm_params:
+      model: smollm2:1.7b
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: emotion-english-distilroberta-base
+    litellm_params:
+      model: emotion-english-distilroberta-base
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: emo-english
+    litellm_params:
+      model: emotion-english-distilroberta-base
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: twitter-roberta-base-emotion
+    litellm_params:
+      model: twitter-roberta-base-emotion
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: emo-twitter
+    litellm_params:
+      model: twitter-roberta-base-emotion
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: twitter-roberta-base-sentiment-latest
+    litellm_params:
+      model: twitter-roberta-base-sentiment-latest
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: sent-twitter
+    litellm_params:
+      model: twitter-roberta-base-sentiment-latest
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0
+  - model_name: qwen3-235b-int8
+    litellm_params:
+      model: qwen3-235b-int8
+      api_base: ${OLLAMA_BASE_URL}
+      custom_llm_provider: ollama
+      temperature: 0.2
+
+router:
+  default_model: planner

@@ -1,0 +1,19 @@
+defaults:
+  runtime_mode: local
+  schema: public
+  file_glob: "**/*"
+  archive_policy: archive    # archive processed files after successful ingestion
+  mode: append               # default to append for test table with no upsert key
+  deployment_suffix: dev
+
+tables:
+  test:
+    # Use the generic table ingest flow for this proof-of-concept.  When you
+    # define real tables you can specify custom flows here if needed.
+    flow_name: "flow_table_ingest"
+    source_dir: "/data/inbox/test"
+    archive_dir: "/data/archive/test"
+    failed_dir: "/data/failed/test"
+    file_glob: "**/*.csv"
+    mode: append
+    transforms: [standardize_colnames]

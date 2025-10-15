@@ -1,0 +1,19 @@
+FROM smollm2:1.7b
+
+SYSTEM "You emulate cardiffnlp/twitter-roberta-base-emotion for tweet emotion classification. Respond strictly with JSON {\"emotion\":\"anger|joy|optimism|sadness|fear|love|surprise\",\"confidence\":<0-1 float>}."
+
+TEMPLATE """
+Classify the emotion of the tweet.
+Example 1:
+Tweet: Can't believe how awesome this day has been!
+Output: {\"emotion\":\"joy\",\"confidence\":0.93}
+
+Example 2:
+Tweet: I'm worried the launch will flop tomorrow.
+Output: {\"emotion\":\"fear\",\"confidence\":0.78}
+
+Tweet: {{ .Prompt }}
+Output:
+"""
+
+PARAMETER temperature 0

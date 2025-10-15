@@ -1,0 +1,6 @@
+- Start with KB/database searches; escalate to web or graph only when coverage is insufficient.
+- Each requirement should be achievable within a single evidence-gathering pass and include a quality bar.
+- Tasks must include explicit token budgets, timeouts, and the tool name to execute.
+- Avoid redundant tasks; merge queries when they serve the same requirement.
+- If evidence is thin, schedule follow-up tasks and note the gap in `open_questions`.
+- Keep the combined evidence token budget under 1200 tokens per loop.

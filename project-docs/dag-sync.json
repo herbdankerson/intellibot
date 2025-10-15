@@ -1,0 +1,19 @@
+{
+  "generated_at": "2025-10-13T00:00:00Z",
+  "uploads": [
+    {
+      "project_key": "DEV-TASKS",
+      "dag_file": "intellibot/project-docs/tasks/dev-tasks-dag.md",
+      "uploaded_at": "2025-10-13T21:09:30Z",
+      "prefect_deployment": "freshbot_document_ingest/freshbot-document-ingest",
+      "prefect_flow_run_id": "3da33d2f-a64a-42bc-9216-8320ffe81343",
+      "neo4j_sync": {
+        "status": "completed",
+        "last_synced_at": "2025-10-13T21:09:30Z",
+        "flow_run_id": "4f126007-53d3-40c7-a597-be97acdbe40d",
+        "notes": "Task graph mirrored into Neo4j via task-sync-neo4j/freshbot-task-graph-sync."
+      },
+      "notes": "Placeholder entry for the current project DAG; update once upload + sync complete."
+    }
+  ]
+}

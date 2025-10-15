@@ -1,0 +1,24 @@
+tunnel: dankersons-mcp
+ingress:
+  - hostname: legal-mcp.dankersons.com
+    service: http://mcp-gateway-legal:8080
+  - hostname: neo4j-cypher-mcp.dankersons.com
+    service: http://mcp-gateway-neo4j-cypher:8080
+  - hostname: neo4j-memory-mcp.dankersons.com
+    service: http://mcp-gateway-neo4j-memory:8080
+  - hostname: neo4j-modeling-mcp.dankersons.com
+    service: http://mcp-gateway-neo4j-modeling:8080
+  # Disabled legacy connectors
+  - hostname: duckduckgo-mcp.dankersons.com
+    service: http_status:404
+  - hostname: fetch-mcp.dankersons.com
+    service: http_status:404
+  - hostname: time-mcp.dankersons.com
+    service: http_status:404
+  - hostname: wikipedia-mcp.dankersons.com
+    service: http_status:404
+  - hostname: filesystem-mcp.dankersons.com
+    service: http_status:404
+  - hostname: desktop-mcp.dankersons.com
+    service: http_status:404
+  - service: http_status:404
