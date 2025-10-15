@@ -56,3 +56,4 @@ mcp/legal-knowledge-base/data/inbox/*
 !mcp/legal-knowledge-base/data/inbox/.gitkeep
 mcp/legal-knowledge-base/data/parsed/*
 !mcp/legal-knowledge-base/data/parsed/.gitkeep
+.trash/
